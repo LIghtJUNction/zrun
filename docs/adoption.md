@@ -2,14 +2,14 @@
 
 日期：2026-11-23。目标是让 Project Z 上层项目复用底层 z 库，把可复用的调度、等待、计时、取消和资源收尾能力集中维护，并删除消费者中的相同实现。zrun 不反向依赖 zharness 或 ssmcp；应用状态与业务授权继续由各自项目拥有。
 
-## 当前证据与接入顺序
+## 调查基线与接入顺序
 
-本次读取的最新源为 zharness `8907262ce6c8494f2849f8e5abd84f7a3da2e405`（0.6.0）、ssmcp `7bb087582e74e7b75cdb2e6997d61d826d5cebd8`（0.10.28）、zaccel `073d7089a1edbe3cada796be7d3bda449e7257ba`。zrun 的 P0 实现为 `12e6421ddfc898658ab59f97e922979e85d8b597`；性能和正确性结果见 [实际报告](measurements/p0-linux-20261123.md)。以下是代码级接入计划，尚未把这些消费者标为已迁移。
+首轮调查固定的源为 zharness `8907262ce6c8494f2849f8e5abd84f7a3da2e405`（0.6.0）、ssmcp `7bb087582e74e7b75cdb2e6997d61d826d5cebd8`（0.10.28）、zaccel `073d7089a1edbe3cada796be7d3bda449e7257ba`。zrun 的 P0 实现为 `12e6421ddfc898658ab59f97e922979e85d8b597`；性能和正确性结果见 [实际报告](measurements/p0-linux-20261123.md)。以下是代码级接入计划，尚未把这些消费者标为已迁移。
 
 | 消费者与实际位置 | 可以集中到 zrun 的能力 | 消费者保留的职责 | 前置条件 |
 | --- | --- | --- | --- |
 | zharness `src/cluster.rs` 与应用执行层 | 有界并发执行、任务结果汇聚、取消和计时；采用可选的 std 适配层 | TaskBoard 的任务依赖、租约、能力匹配、调用方时钟与 payload 生命周期 | 先定义适配层边界，保留 no_std 核心的使用方式；不让租约到期自动重放外部副作用 |
-| ssmcp `src/backend/opencode/cleanup.rs` | 阻塞工作队列、完成句柄、取消后的收尾、显式 drain | EventLog 关闭顺序、归档记录、流传输和业务错误 | zrun 增加有界阻塞池；排队的归档闭包在 runtime 关闭时仍有明确归属与完成保证 |
+| ssmcp `src/worker/executor.rs` 的历史写入边界 | 后续有界阻塞工作、完成句柄与显式 drain | 捕获的提交 owner、先记请求再派发、持久化结果、租约与未知结果归属 | 以当前主线重新建立行为基线；P0 未提供阻塞池，也不能直接接管 Tokio 的进程与网络 Future |
 | ssmcp `src/session/service.rs` 与异步服务入口 | 未来的任务组、停止通知、定时等待、I/O 驱动 | PID/进程组、guardian/Windows Job、身份验证、epoch 检查与会话租约 | P1 多线程、P2/P3 I/O 与进程能力，完整跨平台生命周期验收 |
 | zaccel `src/gpu.rs::wait_future` | 公共 Future 驱动、截止时间和唤醒等待 | `wgpu::Device::poll`、device-lost/validation 错误、CLI 子进程看门狗 | 提供驱动外部事件源的接口；仅套用普通 block_on 会漏掉 GPU 进度推进 |
 
@@ -19,7 +19,9 @@ ssmcp 当前使用 Tokio 的网络、TLS/WebSocket、进程、信号、文件、
 
 ## 第一个可交付的公共能力：有界阻塞收尾
 
-ssmcp 的 `Finalizers`、`Finalizer`、`DeferredWork` 和 `Shutdown` 管理了两类收尾句柄：Tokio blocking task 与普通线程。关闭途中被丢弃的排队工作会把闭包转交到仍有归属的执行者，流任务完成后才允许关闭归档。迁移必须保存这个顺序，不能将它简化为 abort 后丢弃句柄。
+2026-11-24（UTC+8）复核：ssmcp 主线 `b5fdceea9af1b14f6f178bbc1677969fd3ff73c9` 已移除嵌入式 OpenCode 等后端，首轮的 `src/backend/opencode/cleanup.rs` 切口随之退役。以下 `Finalizers` 调查保留为历史设计依据，不再列为当前消费者待修改文件。新的候选边界是 `src/worker/executor.rs` 中请求和结果的阻塞历史写入：持久化先后顺序、捕获的提交 owner 和派发后的 unknown 语义都由消费者保留。迁移前仍须建立当前版本的行为测试，不把旧后端的测试结果沿用到新切口。
+
+首轮基线中的 `Finalizers`、`Finalizer`、`DeferredWork` 和 `Shutdown` 管理了两类收尾句柄：Tokio blocking task 与普通线程。关闭途中被丢弃的排队工作会把闭包转交到仍有归属的执行者，流任务完成后才允许关闭归档。迁移必须保存这个顺序，不能将它简化为 abort 后丢弃句柄。
 
 计划在 zrun 的后续阶段提供一个独立、有界的 blocking 模块。以下为需要评审的接口契约，P0 尚未导出这些 API：
 
@@ -29,7 +31,7 @@ ssmcp 的 `Finalizers`、`Finalizer`、`DeferredWork` 和 `Shutdown` 管理了�
 - Future 的 poll/Drop 不执行磁盘归档，也不无限阻塞等待线程。收尾策略由应用明确选择，不在析构中隐式创建第二套调度器。
 - 结果通道和任务状态复用 `zrun-sync`、`zrun-task` 的已验证原语；不要在新模块重新实现 RawWaker 或结果所有权。
 
-先在 zrun 中验证排队取消、运行中取消、关闭竞态、panic、容量恢复、嵌套提交与结果接收者被丢弃，再将 ssmcp 的通用收尾部分替换为该模块。ssmcp 自己的流取消和归档顺序测试保持有效，重点复用现有 `queued_archive_survives_runtime_shutdown_exactly_once` 等行为断言。
+先在 zrun 中验证排队取消、运行中取消、关闭竞态、panic、容量恢复、嵌套提交与结果接收者被丢弃，再评估当前 ssmcp 的阻塞历史写入边界。旧基线的 `queued_archive_survives_runtime_shutdown_exactly_once` 可作为设计反例，但该文件已随旧后端移除；必须重新覆盖当前请求持久化失败、派发前取消、派发后超时和结果归属，不能声称旧测试在新主线仍然存在。
 
 ## 每批迁移的完成标准
 
@@ -44,4 +46,4 @@ ssmcp 的 `Finalizers`、`Finalizer`、`DeferredWork` 和 `Shutdown` 管理了�
 
 P0 源码、设计、基准工具和实际证据已具备。用户于 2026-11-23 授权公开源码与 P0 预览发行；标准源仓库为 https://github.com/LIghtJUNction/zrun.git。消费者仍需满足上表的能力前提并实际迁移、验证；公开源码本身不代表已经完成接入。
 
-Loom、24 小时稳定性、多 worker、I/O/TCP 和跨平台运行时门槛仍然独立。Miri 和百万任务用例的成功不会自动放行这些门槛。
+休眠通知握手已通过 3 个 Loom 模型，详见 [配对实验](measurements/p0-parking-20261123.md)；这不覆盖整个未来多线程运行时。24 小时稳定性、多 worker、I/O/TCP 和跨平台运行时门槛仍然独立。Miri、局部 Loom 和百万任务用例的成功不会自动放行这些门槛。
