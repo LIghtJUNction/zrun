@@ -1,0 +1,1071 @@
+{
+  "schema_version": 1,
+  "scope": "P0 notification handshake, paired revisions; no publication or deployment",
+  "baseline_source": "b5fdf1ffc4199be5f8b7c7650514550d90603b57",
+  "candidate_source": "156188c1a22fa70d50ab89e937ee69425223619d",
+  "builds": {
+    "baseline": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "zrun-bench"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.07521395100047812,
+      "source_head": "b5fdf1ffc4199be5f8b7c7650514550d90603b57",
+      "source_status": "",
+      "binary": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-baseline",
+      "binary_sha256": "91988e69c1366eeb07a98de12aebff7a420d595f3d87f158d145226469e0f2d4"
+    },
+    "candidate": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "zrun-bench"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 3.879623935001291,
+      "source_head": "156188c1a22fa70d50ab89e937ee69425223619d",
+      "source_status": "",
+      "binary": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-candidate",
+      "binary_sha256": "306b37f34d4bc85df27f418d03832ed1c2c88d6dfa1edf8cbf3657a3a55b5d1d"
+    }
+  },
+  "environment": {
+    "captured_utc": "2026-11-23T15:10:18Z",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "kernel": "6.18.57",
+    "uname": {
+      "system": "Linux",
+      "node": "dc525466a1a6",
+      "release": "6.18.57",
+      "version": "#1 SMP Tue Oct 20 21:56:04 UTC 2026",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "cpu_detail": null,
+    "logical_cpus": 9,
+    "cpu_affinity": [
+      4
+    ],
+    "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+    "rustc_on_path": {
+      "command": [
+        "rustc",
+        "-Vv"
+      ],
+      "exit_code": 0,
+      "stdout": "rustc 1.100.0 (0ef1bc386 2026-11-09)\nbinary: rustc\ncommit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a\ncommit-date: 2026-11-09\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0\nLLVM version: 23.1.5",
+      "stderr": ""
+    },
+    "governor_cpu0": null,
+    "memory": "MemTotal:       10206468 kB\nMemFree:         3941200 kB\nMemAvailable:    8062628 kB\nBuffers:           60704 kB\nCached:          4580160 kB\nSwapCached:            0 kB\nActive:          2948360 kB\nInactive:        1936880 kB\nActive(anon):     819204 kB\nInactive(anon):   403812 kB\nActive(file):    2129156 kB\nInactive(file):  1533068 kB\nUnevictable:       29944 kB\nMlocked:               0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nDirty:            202308 kB\nWriteback:             0 kB\nAnonPages:        274380 kB\nMapped:           166944 kB\nShmem:            948816 kB\nKReclaimable:     781096 kB\nSlab:             905112 kB\nSReclaimable:     781096 kB\nSUnreclaim:       124016 kB\nKernelStack:        6064 kB\nPageTables:        11684 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     5103232 kB\nCommitted_AS:    2545300 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:        7300 kB\nVmallocChunk:          0 kB\nPercpu:             3024 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:     63488 kB\nFilePmdMapped:         0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      362496 kB\nDirectMap2M:     8161280 kB\nDirectMap1G:    18874368 kB\n",
+    "rustflags": null,
+    "cargo_encoded_rustflags": null,
+    "binary": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-candidate",
+    "binary_sha256": "306b37f34d4bc85df27f418d03832ed1c2c88d6dfa1edf8cbf3657a3a55b5d1d",
+    "cargo_lock": {
+      "sha256": "bdadad3a04ad7ea255c2096a3e4a2f828353b3c38884d215b2bf84dd149e2e9f",
+      "comparator_packages": [
+        {
+          "name": "tokio",
+          "version": "1.54.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3",
+          "dependencies": [
+            "pin-project-lite"
+          ]
+        },
+        {
+          "name": "zrun",
+          "version": "0.1.0",
+          "dependencies": [
+            "zrun-executor",
+            "zrun-sync",
+            "zrun-task",
+            "zrun-time"
+          ]
+        },
+        {
+          "name": "zrun-bench",
+          "version": "0.1.0",
+          "dependencies": [
+            "serde_json",
+            "tokio",
+            "zrun"
+          ]
+        }
+      ]
+    },
+    "source_head": {
+      "command": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "exit_code": 0,
+      "stdout": "156188c1a22fa70d50ab89e937ee69425223619d",
+      "stderr": ""
+    },
+    "source_dirty": {
+      "command": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "source_identity_note": "HEAD/dirty describe collection checkout; build metadata and binary hash identify executable."
+  },
+  "config": {
+    "baseline": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-baseline",
+    "baseline_build": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/baseline-build.json",
+    "candidate": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-candidate",
+    "candidate_build": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/candidate-build.json",
+    "output": "/workspace/scratch/91d8c179742d/zrun-parking-evidence/paired-10rounds",
+    "tasks": [
+      1000,
+      10000,
+      100000,
+      1000000
+    ],
+    "scenarios": [
+      "spawn_join",
+      "yield",
+      "wake_latency",
+      "pending_memory",
+      "idle"
+    ],
+    "rounds": 10,
+    "bootstrap": 5000,
+    "seed": 20261123,
+    "timeout": 120,
+    "affinity": "4",
+    "yields": 16,
+    "latency_samples": 10000,
+    "hold_ms": 20
+  },
+  "sample_count": 400,
+  "successful_samples": 400,
+  "checks": {
+    "workspace-tests": {
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 22.96246328500274
+    },
+    "strict-clippy": {
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 4.631358304002788
+    },
+    "loom": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "zrun-executor",
+        "--lib",
+        "model_"
+      ],
+      "environment": {
+        "RUSTFLAGS": "--cfg loom",
+        "CARGO_TARGET_DIR": "/workspace/scratch/91d8c179742d/zrun-loom-target"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 18.23252809800033
+    },
+    "miri-executor": {
+      "command": [
+        "cargo",
+        "miri",
+        "test",
+        "--locked",
+        "-p",
+        "zrun-executor",
+        "--lib"
+      ],
+      "environment": {
+        "MIRIFLAGS": "-Zmiri-disable-isolation",
+        "CARGO_TARGET_DIR": "/workspace/scratch/91d8c179742d/zrun-miri-target"
+      },
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_seconds": 30.379588124000293
+    },
+    "paired-comparison": {
+      "command": [
+        "python3",
+        "scripts/compare_revisions.py",
+        "--baseline",
+        "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-baseline",
+        "--baseline-build",
+        "/workspace/scratch/91d8c179742d/zrun-parking-evidence/baseline-build.json",
+        "--candidate",
+        "/workspace/scratch/91d8c179742d/zrun-parking-evidence/zrun-bench-candidate",
+        "--candidate-build",
+        "/workspace/scratch/91d8c179742d/zrun-parking-evidence/candidate-build.json",
+        "--output",
+        "/workspace/scratch/91d8c179742d/zrun-parking-evidence/paired-10rounds",
+        "--rounds",
+        "10",
+        "--affinity",
+        "4"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 330.6139946519979
+    }
+  },
+  "runtime_dependency_tree": "zrun v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation)\n├── zrun-executor v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-executor)\n│   ├── zrun-task v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-task)\n│   │   └── zrun-sync v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-sync)\n│   └── zrun-time v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-time)\n├── zrun-sync v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-sync)\n├── zrun-task v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-task) (*)\n└── zrun-time v0.1.0 (/workspace/scratch/91d8c179742d/zrun-validation/crates/zrun-time)\n",
+  "summary": {
+    "cells": [
+      {
+        "tasks": 1000,
+        "scenario": "spawn_join",
+        "metric": "spawn_join_ops_per_sec",
+        "unit": "tasks/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 1153453.4134320705,
+            "p95": 1258771.2662664498,
+            "p99": 1259764.1519104948,
+            "median_bootstrap_95_ci": [
+              929673.888993219,
+              1234398.4831928052
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 1123046.7435116875,
+            "p95": 1304024.8048677486,
+            "p99": 1312260.5698320633,
+            "median_bootstrap_95_ci": [
+              715913.9070571929,
+              1239694.9727076064
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.9736385799666509,
+        "ratio_bootstrap_95_ci": [
+          0.630990621059335,
+          1.1615915019687968
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000,
+        "scenario": "yield",
+        "metric": "wake_ops_per_sec",
+        "unit": "wakes/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 4548834.6574033145,
+            "p95": 4746254.712987618,
+            "p99": 4748184.095323243,
+            "median_bootstrap_95_ci": [
+              4183253.7033560677,
+              4715137.36341885
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 5225007.543105365,
+            "p95": 5625753.799575024,
+            "p99": 5659552.700639036,
+            "median_bootstrap_95_ci": [
+              4927654.70210436,
+              5480591.342104334
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.1486474969147462,
+        "ratio_bootstrap_95_ci": [
+          1.0776379712225508,
+          1.2632616734639832
+        ],
+        "evidence_of_improvement": true
+      },
+      {
+        "tasks": 1000,
+        "scenario": "wake_latency",
+        "metric": "wake_p99_ns",
+        "unit": "ns",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 542532.56,
+            "p95": 942216.4499999995,
+            "p99": 1120837.722,
+            "median_bootstrap_95_ci": [
+              497709.07,
+              648493.58
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 485440.245,
+            "p95": 906118.4989999994,
+            "p99": 1117318.2518000002,
+            "median_bootstrap_95_ci": [
+              481663.19,
+              569108.21
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.8947670255956618,
+        "ratio_bootstrap_95_ci": [
+          0.7465783701359079,
+          1.1051845106207359
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000,
+        "scenario": "pending_memory",
+        "metric": "pending_bytes_per_task",
+        "unit": "bytes/task",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 360.448,
+            "p95": 360.448,
+            "p99": 360.448,
+            "median_bootstrap_95_ci": [
+              360.448,
+              360.448
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 360.448,
+            "p95": 360.448,
+            "p99": 360.448,
+            "median_bootstrap_95_ci": [
+              360.448,
+              360.448
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000,
+        "scenario": "idle",
+        "metric": "idle_rss_delta_bytes",
+        "unit": "bytes",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 163840.0,
+            "p99": 163840.0,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              163840.0
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 163840.0,
+            "p99": 163840.0,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              131072.0
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          0.6,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 10000,
+        "scenario": "spawn_join",
+        "metric": "spawn_join_ops_per_sec",
+        "unit": "tasks/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 1047745.4737008958,
+            "p95": 1206313.7908516533,
+            "p99": 1240320.27228795,
+            "median_bootstrap_95_ci": [
+              868991.8128602594,
+              1131299.144341892
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 1136522.3223332171,
+            "p95": 1254506.9069568387,
+            "p99": 1276861.7700867206,
+            "median_bootstrap_95_ci": [
+              848926.62990305,
+              1219345.05562896
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0847313120034197,
+        "ratio_bootstrap_95_ci": [
+          0.8328848782551769,
+          1.2435452803949956
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 10000,
+        "scenario": "yield",
+        "metric": "wake_ops_per_sec",
+        "unit": "wakes/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 4574081.068369892,
+            "p95": 4679092.669227617,
+            "p99": 4683345.202840927,
+            "median_bootstrap_95_ci": [
+              4519629.132008475,
+              4654986.510285499
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 5206448.576502485,
+            "p95": 5324455.187687819,
+            "p99": 5350186.885156193,
+            "median_bootstrap_95_ci": [
+              5007514.871458502,
+              5283072.994502567
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.1382501749926255,
+        "ratio_bootstrap_95_ci": [
+          1.0923331908946785,
+          1.1576885670361092
+        ],
+        "evidence_of_improvement": true
+      },
+      {
+        "tasks": 10000,
+        "scenario": "wake_latency",
+        "metric": "wake_p99_ns",
+        "unit": "ns",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 5784169.58,
+            "p95": 7101473.2415,
+            "p99": 7296606.3922999995,
+            "median_bootstrap_95_ci": [
+              5444215.76,
+              6338133.065
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 5362551.75,
+            "p95": 5819878.033499999,
+            "p99": 6011609.4147,
+            "median_bootstrap_95_ci": [
+              5151363.525,
+              5507647.62
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.9271083213988343,
+        "ratio_bootstrap_95_ci": [
+          0.8400931386075067,
+          0.975731165712787
+        ],
+        "evidence_of_improvement": true
+      },
+      {
+        "tasks": 10000,
+        "scenario": "pending_memory",
+        "metric": "pending_bytes_per_task",
+        "unit": "bytes/task",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 349.7984,
+            "p95": 349.7984,
+            "p99": 349.7984,
+            "median_bootstrap_95_ci": [
+              349.7984,
+              349.7984
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 349.7984,
+            "p95": 349.7984,
+            "p99": 349.7984,
+            "median_bootstrap_95_ci": [
+              349.7984,
+              349.7984
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 10000,
+        "scenario": "idle",
+        "metric": "idle_rss_delta_bytes",
+        "unit": "bytes",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 134348.79999999993,
+            "p99": 157941.76,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              98304.0
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 134348.79999999993,
+            "p99": 157941.76,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              98304.0
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 100000,
+        "scenario": "spawn_join",
+        "metric": "spawn_join_ops_per_sec",
+        "unit": "tasks/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 1011715.445492297,
+            "p95": 1122230.455906502,
+            "p99": 1130545.7901240124,
+            "median_bootstrap_95_ci": [
+              894092.2514728874,
+              1078629.8119112821
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 987288.7108394504,
+            "p95": 1149760.6348272183,
+            "p99": 1158916.2817687734,
+            "median_bootstrap_95_ci": [
+              889138.3879522581,
+              1133770.0986118084
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.9758561216380752,
+        "ratio_bootstrap_95_ci": [
+          0.8317347764056068,
+          1.2377621126007015
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 100000,
+        "scenario": "yield",
+        "metric": "wake_ops_per_sec",
+        "unit": "wakes/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 4327648.705865834,
+            "p95": 4456692.845439936,
+            "p99": 4493107.004748871,
+            "median_bootstrap_95_ci": [
+              4104334.5862173787,
+              4397360.041601005
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 4862736.461906013,
+            "p95": 5089940.273648036,
+            "p99": 5102032.416729817,
+            "median_bootstrap_95_ci": [
+              3963197.8831688203,
+              5070020.500437768
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.123643990630502,
+        "ratio_bootstrap_95_ci": [
+          0.9156395283867838,
+          1.2311544879969771
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 100000,
+        "scenario": "wake_latency",
+        "metric": "wake_p99_ns",
+        "unit": "ns",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 53062412.230000004,
+            "p95": 60628356.967499994,
+            "p99": 63943497.697500005,
+            "median_bootstrap_95_ci": [
+              52491442.91500001,
+              54431458.2
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 51730633.685,
+            "p95": 56951964.566999994,
+            "p99": 58441669.0254,
+            "median_bootstrap_95_ci": [
+              50621821.989999995,
+              54529245.09
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.9749016584615984,
+        "ratio_bootstrap_95_ci": [
+          0.9441955926104656,
+          1.0332159683419977
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 100000,
+        "scenario": "pending_memory",
+        "metric": "pending_bytes_per_task",
+        "unit": "bytes/task",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 342.46656,
+            "p95": 342.46656,
+            "p99": 342.46656,
+            "median_bootstrap_95_ci": [
+              342.46656,
+              342.46656
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 342.46656,
+            "p95": 342.46656,
+            "p99": 342.46656,
+            "median_bootstrap_95_ci": [
+              342.46656,
+              342.46656
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 100000,
+        "scenario": "idle",
+        "metric": "idle_rss_delta_bytes",
+        "unit": "bytes",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 163840.0,
+            "p99": 163840.0,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              163840.0
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 131072.0,
+            "p95": 163840.0,
+            "p99": 163840.0,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              163840.0
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.3333333333333333,
+        "ratio_bootstrap_95_ci": [
+          0.6,
+          1.6666666666666667
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000000,
+        "scenario": "spawn_join",
+        "metric": "spawn_join_ops_per_sec",
+        "unit": "tasks/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 638050.9883792617,
+            "p95": 759150.6021894382,
+            "p99": 781711.250900764,
+            "median_bootstrap_95_ci": [
+              504895.5115633712,
+              709067.2502885753
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 672549.3486004785,
+            "p95": 831700.7253704299,
+            "p99": 848620.3676404787,
+            "median_bootstrap_95_ci": [
+              509979.8207516803,
+              800201.4785692412
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.054068343830714,
+        "ratio_bootstrap_95_ci": [
+          0.7647400004831592,
+          1.437840170979966
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000000,
+        "scenario": "yield",
+        "metric": "wake_ops_per_sec",
+        "unit": "wakes/s",
+        "direction": "higher",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 2681664.316694265,
+            "p95": 2872265.598032921,
+            "p99": 2874116.439446381,
+            "median_bootstrap_95_ci": [
+              2592304.4000784187,
+              2815290.169808504
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 2974564.0159836514,
+            "p95": 3149667.704920372,
+            "p99": 3151252.7942737257,
+            "median_bootstrap_95_ci": [
+              2918316.639728002,
+              3121557.34171136
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.109223103527905,
+        "ratio_bootstrap_95_ci": [
+          1.0729527935785905,
+          1.1728961990710705
+        ],
+        "evidence_of_improvement": true
+      },
+      {
+        "tasks": 1000000,
+        "scenario": "wake_latency",
+        "metric": "wake_p99_ns",
+        "unit": "ns",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 686020322.27,
+            "p95": 802398181.781,
+            "p99": 807923667.4202,
+            "median_bootstrap_95_ci": [
+              660030695.3199999,
+              774228760.99
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 676618980.255,
+            "p95": 725500494.527,
+            "p99": 736642250.0654,
+            "median_bootstrap_95_ci": [
+              635050828.3100001,
+              706934406.56
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 0.9862958257797794,
+        "ratio_bootstrap_95_ci": [
+          0.8671370240110418,
+          1.0506738941247467
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000000,
+        "scenario": "pending_memory",
+        "metric": "pending_bytes_per_task",
+        "unit": "bytes/task",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 355.672064,
+            "p95": 355.672064,
+            "p99": 355.672064,
+            "median_bootstrap_95_ci": [
+              355.672064,
+              355.672064
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 355.672064,
+            "p95": 355.672064,
+            "p99": 355.672064,
+            "median_bootstrap_95_ci": [
+              355.672064,
+              355.672064
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      },
+      {
+        "tasks": 1000000,
+        "scenario": "idle",
+        "metric": "idle_rss_delta_bytes",
+        "unit": "bytes",
+        "direction": "lower",
+        "status": "evaluated",
+        "pairs": 10,
+        "expected_pairs": 10,
+        "variants": {
+          "baseline": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 134348.79999999993,
+            "p99": 157941.76,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              98304.0
+            ]
+          },
+          "candidate": {
+            "n": 10,
+            "missing": 0,
+            "median": 98304.0,
+            "p95": 134348.79999999993,
+            "p99": 157941.76,
+            "median_bootstrap_95_ci": [
+              98304.0,
+              98304.0
+            ]
+          }
+        },
+        "ratio_definition": "median(candidate) / median(baseline)",
+        "ratio": 1.0,
+        "ratio_bootstrap_95_ci": [
+          1.0,
+          1.0
+        ],
+        "evidence_of_improvement": false
+      }
+    ],
+    "tokio_targets": "not_evaluated_by_revision_comparison",
+    "interpretation": "At least ten complete positive release pairs and a 95% ratio interval strictly beyond 1 establish a measured improvement for this workload. No multiplicity correction or full-project acceptance."
+  },
+  "raw_report_sha256": "9309c96b0859d3c243ff2985131168dd303286de33b91cb636edc062df9df9a3",
+  "raw_evidence_location": "evidence/parking/paired-10rounds/report.json in the source-and-evidence delivery archive",
+  "source_timing_note": "Rust correctness checks ran after the implementation edit and before commit 156188c was created. No Rust source changed between those checks and the committed release build. The comparison requires clean source build receipts."
+}

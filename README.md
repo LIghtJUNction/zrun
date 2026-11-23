@@ -98,3 +98,7 @@ P0 只比较单 worker。多 worker 队列与窃取属于 P1；Linux epoll、TCP
 [上层依赖替换计划](docs/adoption.md)明确 zrun 与 zharness、ssmcp、zaccel 的职责边界、可迁移代码和接入门槛。底层执行能力只维护一份，上层保留自己的业务状态和资源归属规则。
 
 MIT License。
+
+## P0 通知路径后续实验
+
+[2026-11-23 配对实验](docs/measurements/p0-parking-20261123.md)记录了准备休眠时才发送线程通知的修改、400 个独立进程样本，以及通过的 Loom/Miri 检查。三个规模的自唤醒吞吐有改善证据，spawn 与每任务内存没有明确收益；相对 Tokio 的整体验收仍未通过。
