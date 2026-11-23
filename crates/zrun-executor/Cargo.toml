@@ -12,3 +12,7 @@ zrun-time = { path = "../zrun-time" }
 
 [dev-dependencies]
 zrun-sync = { path = "../zrun-sync" }
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

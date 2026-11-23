@@ -16,6 +16,9 @@ use std::thread::{self, Thread};
 use zrun_task::{JoinHandle, Scheduler, Task};
 use zrun_time::{Driver, Timer};
 
+mod parking;
+use parking::ParkingFlag;
+
 pub const DEFAULT_MAX_TASKS: usize = 65_536;
 const TASK_TURN_BUDGET: usize = 64;
 
@@ -58,10 +61,14 @@ pub struct RuntimeStats {
 #[derive(Default)]
 struct Parker {
     runner: Mutex<Option<Thread>>,
+    parking: ParkingFlag,
 }
 
 impl Parker {
     fn notify(&self) {
+        if !self.parking.notify() {
+            return;
+        }
         let thread = { lock(&self.runner).clone() };
         if let Some(thread) = thread {
             thread.unpark();
@@ -82,6 +89,7 @@ impl Drop for RunnerGuard {
     fn drop(&mut self) {
         // This also runs when the root future unwinds. Spawned-task panics are
         // caught by Task, while a root panic belongs to the block_on caller.
+        self.0.parking.disarm();
         *lock(&self.0.runner) = None;
     }
 }
@@ -315,17 +323,22 @@ impl Runtime {
             }
             self.driver.turn();
 
+            // Arm before inspecting every source of work. A notification that
+            // precedes arm is acquired by the flag; one that follows it owes
+            // this thread an unpark token, even if park has not started yet.
+            self.shared.parker.parking.arm();
             if signal.notified.load(Ordering::Acquire) || self.shared.has_ready() {
+                self.shared.parker.parking.disarm();
                 continue;
             }
             match self.driver.next_timeout() {
-                Some(timeout) if timeout.is_zero() => continue,
+                Some(timeout) if timeout.is_zero() => {}
                 Some(timeout) => thread::park_timeout(timeout),
                 None => thread::park(),
             }
-            // A wake/injection/new earlier timer between the checks and park
-            // leaves an unpark token. Spurious returns also recheck all three
-            // predicates; no notification is represented only by thread sleep.
+            self.shared.parker.parking.disarm();
+            // Spurious returns and old unpark tokens are harmless: every turn
+            // rechecks root readiness, task admission and timer deadlines.
         }
     }
 
@@ -359,7 +372,7 @@ impl Drop for Runtime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use std::cell::Cell;
