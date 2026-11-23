@@ -1,0 +1,75 @@
+name: Release zrun P0
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact P0 preview tag matching Cargo.toml
+        type: string
+        required: true
+        default: v0.1.0-p0.1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zrun-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      TARGET_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Verify exact source and create source artifacts
+        shell: python
+        run: |
+          import hashlib, os, pathlib, re, subprocess, tomllib
+          root = pathlib.Path.cwd()
+          manifest = tomllib.loads((root / 'Cargo.toml').read_text())
+          version = manifest['package']['version']
+          if not re.fullmatch(r'0\.1\.0-p0\.[1-9][0-9]*', version):
+              raise SystemExit('This workflow only publishes a declared P0 preview version')
+          if os.environ['RELEASE_TAG'] != 'v' + version:
+              raise SystemExit('Requested tag differs from Cargo.toml')
+          for member in manifest['workspace']['members']:
+              member_version = tomllib.loads((root / member / 'Cargo.toml').read_text())['package']['version']
+              if member_version != version:
+                  raise SystemExit('Workspace package versions differ')
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if sha != os.environ['TARGET_COMMIT']:
+              raise SystemExit('Checkout does not match the validated workflow commit')
+          if subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip():
+              raise SystemExit('Release source is dirty')
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'zrun-release'
+          output.mkdir()
+          archive = output / ('zrun-' + version + '-source.tar.gz')
+          subprocess.run(['git', 'archive', '--format=tar.gz', '--prefix=zrun-' + version + '/', '-o', str(archive), sha], check=True)
+          (output / 'SOURCE_COMMIT.txt').write_text(sha + '\n', encoding='utf-8')
+          lines = [hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name for path in sorted(output.iterdir())]
+          (output / 'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+      - name: Publish validated P0 preview
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP/zrun-release/"* --target "$TARGET_COMMIT" --prerelease --title "zrun $RELEASE_TAG: P0 preview" --notes-file docs/releases/0.1.0-p0.1.md

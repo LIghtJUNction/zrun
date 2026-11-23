@@ -18,7 +18,7 @@ Linux epoll reactor 为首发实现。定义 socket 注册、readiness 重新武
 
 ## P3：平台与优化
 
-实现并分别验证 macOS kqueue 与 Windows IOCP。根据 CPU profile 和内存数据优化任务布局、调度批量、偷取阈值和 timer 结构；每个优化都必须保留正确性门禁。完整 24 小时 soak 和跨平台 CI 结果进入正式发布决策。当前任务不授权部署或发布。
+实现并分别验证 macOS kqueue 与 Windows IOCP。根据 CPU profile 和内存数据优化任务布局、调度批量、偷取阈值和 timer 结构；每个优化都必须保留正确性门禁。完整 24 小时 soak 和跨平台 CI 结果进入正式发布决策。2026-11-23 用户已授权公开 P0 预览发行；完整正式版仍按上述性能、稳定性和平台门禁决定。
 
 ## 状态记录规则
 
