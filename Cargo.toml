@@ -1,0 +1,26 @@
+[package]
+name = "zrun"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+description = "An independent Rust async runtime: correctness-first P0"
+publish = false
+
+[workspace]
+resolver = "3"
+members = ["crates/zrun-task", "crates/zrun-executor", "crates/zrun-time", "crates/zrun-sync", "crates/zrun-bench"]
+
+[dependencies]
+zrun-executor = { path = "crates/zrun-executor" }
+zrun-task = { path = "crates/zrun-task" }
+zrun-time = { path = "crates/zrun-time" }
+zrun-sync = { path = "crates/zrun-sync" }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = false
+debug = 0

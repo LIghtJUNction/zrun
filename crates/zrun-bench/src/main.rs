@@ -1,0 +1,596 @@
+//! One fresh process produces one sample. Tokio exists only in this comparator.
+use serde_json::{Value, json};
+use std::{
+    future::{Future, poll_fn},
+    io::Write,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
+#[derive(Debug)]
+struct Config {
+    engine: String,
+    scenario: String,
+    tasks: usize,
+    workers: usize,
+    yields: usize,
+    latency_samples: usize,
+    hold_ms: u64,
+    duration_secs: Option<u64>,
+    sample_interval_ms: u64,
+}
+
+impl Config {
+    fn parse() -> Result<Self, String> {
+        let mut c = Self {
+            engine: "zrun".into(),
+            scenario: "spawn_join".into(),
+            tasks: 1000,
+            workers: 1,
+            yields: 16,
+            latency_samples: 10000,
+            hold_ms: 20,
+            duration_secs: None,
+            sample_interval_ms: 1000,
+        };
+        let mut args = std::env::args().skip(1);
+        while let Some(key) = args.next() {
+            if key == "--help" {
+                println!(
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                );
+                std::process::exit(0);
+            }
+            let v = args
+                .next()
+                .ok_or_else(|| format!("missing value for {key}"))?;
+            match key.as_str() {
+                "--engine" => c.engine = v,
+                "--scenario" => c.scenario = v,
+                "--tasks" => c.tasks = v.parse().map_err(|_| "invalid tasks")?,
+                "--workers" => c.workers = v.parse().map_err(|_| "invalid workers")?,
+                "--yields" => c.yields = v.parse().map_err(|_| "invalid yields")?,
+                "--latency-samples" => {
+                    c.latency_samples = v.parse().map_err(|_| "invalid latency samples")?
+                }
+                "--hold-ms" => c.hold_ms = v.parse().map_err(|_| "invalid hold-ms")?,
+                "--duration-secs" => {
+                    c.duration_secs = Some(v.parse().map_err(|_| "invalid duration-secs")?)
+                }
+                "--sample-interval-ms" => {
+                    c.sample_interval_ms = v.parse().map_err(|_| "invalid sample interval")?
+                }
+                _ => return Err(format!("unknown argument {key}")),
+            }
+        }
+        if !["zrun", "tokio"].contains(&c.engine.as_str()) {
+            return Err("unknown engine".into());
+        }
+        if ![
+            "spawn_join",
+            "yield",
+            "wake_latency",
+            "pending_memory",
+            "idle",
+            "soak",
+        ]
+        .contains(&c.scenario.as_str())
+        {
+            return Err("unknown scenario".into());
+        }
+        if !(1..=1_000_000).contains(&c.tasks)
+            || !(1..=10_000).contains(&c.yields)
+            || !(1..=100_000).contains(&c.latency_samples)
+            || c.hold_ms > 10_000
+            || !(1..=60_000).contains(&c.sample_interval_ms)
+        {
+            return Err("configuration outside documented bounds".into());
+        }
+        if c.scenario == "soak" && !c.duration_secs.is_some_and(|s| (1..=604800).contains(&s)) {
+            return Err("soak requires explicit --duration-secs in 1..604800".into());
+        }
+        Ok(c)
+    }
+
+    fn record(&self, status: &str) -> Value {
+        json!({"schema_version": 1, "engine": self.engine, "scenario": self.scenario,
+            "workers": self.workers, "tasks": self.tasks, "status": status,
+            "config": {"yields": self.yields, "latency_samples": self.latency_samples,
+                "hold_ms": self.hold_ms, "duration_secs": self.duration_secs,
+                "sample_interval_ms": self.sample_interval_ms, "timer_enabled": true},
+            "build": {"rustc": env!("ZRUN_BENCH_RUSTC"), "profile": env!("ZRUN_BENCH_PROFILE"),
+                "target": env!("ZRUN_BENCH_TARGET"), "opt_level": env!("ZRUN_BENCH_OPT_LEVEL"),
+                "encoded_rustflags": env!("ZRUN_BENCH_CARGO_ENCODED_RUSTFLAGS"),
+                "tokio": "1.54.1", "comparator": env!("CARGO_PKG_VERSION")}})
+    }
+}
+
+trait Abort {
+    fn abort(&self);
+}
+
+struct ZrunJoin<T>(zrun::JoinHandle<T>);
+impl<T> Abort for ZrunJoin<T> {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+impl<T> Future for ZrunJoin<T> {
+    type Output = Result<T, String>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().0).poll(cx).map(|v| {
+            v.map_err(|e| {
+                if e.is_cancelled() {
+                    "cancelled".into()
+                } else {
+                    format!("non-cancellation join failure: {e}")
+                }
+            })
+        })
+    }
+}
+
+struct TokioJoin<T>(tokio::task::JoinHandle<T>);
+impl<T> Abort for TokioJoin<T> {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+impl<T> Future for TokioJoin<T> {
+    type Output = Result<T, String>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().0).poll(cx).map(|v| {
+            v.map_err(|e| {
+                if e.is_cancelled() {
+                    "cancelled".into()
+                } else {
+                    format!("non-cancellation join failure: {e}")
+                }
+            })
+        })
+    }
+}
+
+trait Engine: Sized {
+    type Handle<T>: Future<Output = Result<T, String>> + Unpin + Abort
+    where
+        T: Send + 'static;
+    fn new(max_tasks: usize) -> Result<Self, String>;
+    fn spawn<F>(&self, future: F) -> Result<Self::Handle<F::Output>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static;
+    fn block_on<F: Future>(&mut self, future: F) -> F::Output;
+    fn alive(&self) -> usize;
+}
+
+impl Engine for zrun::Runtime {
+    type Handle<T>
+        = ZrunJoin<T>
+    where
+        T: Send + 'static;
+    fn new(max_tasks: usize) -> Result<Self, String> {
+        Self::with_max_tasks(max_tasks).map_err(|e| e.to_string())
+    }
+    fn spawn<F>(&self, f: F) -> Result<Self::Handle<F::Output>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn(f).map(ZrunJoin).map_err(|e| e.to_string())
+    }
+    fn block_on<F: Future>(&mut self, f: F) -> F::Output {
+        self.block_on(f)
+    }
+    fn alive(&self) -> usize {
+        self.stats().active_tasks
+    }
+}
+
+impl Engine for tokio::runtime::Runtime {
+    type Handle<T>
+        = TokioJoin<T>
+    where
+        T: Send + 'static;
+    fn new(_: usize) -> Result<Self, String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|e| e.to_string())
+    }
+    fn spawn<F>(&self, f: F) -> Result<Self::Handle<F::Output>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        Ok(TokioJoin(self.spawn(f)))
+    }
+    fn block_on<F: Future>(&mut self, f: F) -> F::Output {
+        tokio::runtime::Runtime::block_on(self, f)
+    }
+    fn alive(&self) -> usize {
+        self.metrics().num_alive_tasks()
+    }
+}
+
+struct YieldWork {
+    remaining: usize,
+    index: usize,
+}
+impl Future for YieldWork {
+    type Output = usize;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+        if self.remaining == 0 {
+            return Poll::Ready(self.index);
+        }
+        self.remaining -= 1;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+struct WakeWork {
+    index: usize,
+    sampled: bool,
+    armed: bool,
+    start: Option<Instant>,
+}
+impl Future for WakeWork {
+    type Output = (usize, Option<u64>);
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.armed {
+            return Poll::Ready((
+                self.index,
+                self.start.map(|t| t.elapsed().as_nanos() as u64),
+            ));
+        }
+        self.armed = true;
+        if self.sampled {
+            self.start = Some(Instant::now());
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+struct PendingWork {
+    entered: bool,
+    count: Arc<AtomicUsize>,
+}
+impl Future for PendingWork {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        if !self.entered {
+            self.entered = true;
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+        Poll::Pending
+    }
+}
+
+fn rss() -> Value {
+    #[cfg(target_os = "linux")]
+    let (source, value) = (
+        "proc_status_vmrss",
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|l| {
+                    l.strip_prefix("VmRSS:")
+                        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+                        .and_then(|v| v.checked_mul(1024))
+                })
+            }),
+    );
+    #[cfg(target_os = "macos")]
+    let (source, value) = (
+        "ps_rss",
+        std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .and_then(|v| v.checked_mul(1024)),
+    );
+    #[cfg(target_os = "windows")]
+    let (source, value) = (
+        "powershell_working_set",
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("(Get-Process -Id {}).WorkingSet64", std::process::id()),
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            }),
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let (source, value): (&str, Option<u64>) = ("unsupported", None);
+    json!({"bytes": value, "source": source, "available": value.is_some()})
+}
+
+fn rss_delta(after: &Value, before: &Value) -> Option<i64> {
+    Some(
+        i64::try_from(after["bytes"].as_u64()?).ok()?
+            - i64::try_from(before["bytes"].as_u64()?).ok()?,
+    )
+}
+
+fn percentile(values: &mut [u64], q: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let p = (values.len() - 1) as f64 * q;
+    let a = p.floor() as usize;
+    let b = p.ceil() as usize;
+    Some(values[a] as f64 + (values[b] as f64 - values[a] as f64) * (p - a as f64))
+}
+
+async fn join_indices<H: Future<Output = Result<usize, String>>>(
+    handles: Vec<H>,
+) -> Result<u64, String> {
+    let mut checksum = 0;
+    for (i, handle) in handles.into_iter().enumerate() {
+        let value = handle.await?;
+        if value != i {
+            return Err(format!("task {i} returned {value}"));
+        }
+        checksum += value as u64;
+    }
+    Ok(checksum)
+}
+
+fn batch<E: Engine>(rt: &mut E, tasks: usize, yields: usize) -> Result<u64, String> {
+    let mut handles = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        handles.push(rt.spawn(YieldWork {
+            remaining: yields,
+            index,
+        })?);
+    }
+    let checksum = rt.block_on(join_indices(handles))?;
+    if rt.alive() != 0 {
+        return Err("tasks still active after all joins".into());
+    }
+    Ok(checksum)
+}
+
+fn emit(value: &Value) -> Result<(), String> {
+    let mut out = std::io::stdout().lock();
+    serde_json::to_writer(&mut out, value).map_err(|e| e.to_string())?;
+    out.write_all(b"\n")
+        .and_then(|_| out.flush())
+        .map_err(|e| e.to_string())
+}
+
+fn soak<E: Engine>(c: &Config, mut rt: E) -> Result<Value, String> {
+    let duration = Duration::from_secs(c.duration_secs.ok_or("missing soak duration")?);
+    let started = Instant::now();
+    let mut next_sample = Duration::ZERO;
+    let mut cycles = 0_u64;
+    let mut completed = 0_u64;
+    let expected = c.tasks as u64 * (c.tasks as u64 - 1) / 2;
+    let mut event = c.record("running");
+    event["event"] = json!("start");
+    event["rss"] = rss();
+    emit(&event)?;
+    while started.elapsed() < duration {
+        if batch(&mut rt, c.tasks, c.yields)? != expected {
+            return Err("soak checksum mismatch".into());
+        }
+        cycles += 1;
+        completed += c.tasks as u64;
+        let elapsed = started.elapsed();
+        if elapsed >= next_sample {
+            let mut sample = c.record("running");
+            sample["event"] = json!("sample");
+            sample["elapsed_secs"] = json!(elapsed.as_secs_f64());
+            sample["cycles"] = json!(cycles);
+            sample["completed_tasks"] = json!(completed);
+            sample["active_tasks"] = json!(rt.alive());
+            sample["rss"] = rss();
+            emit(&sample)?;
+            next_sample = elapsed + Duration::from_millis(c.sample_interval_ms);
+        }
+    }
+    let mut result = c.record("ok");
+    result["event"] = json!("finish");
+    result["correctness"] = json!(true);
+    result["cycles"] = json!(cycles);
+    result["completed_tasks"] = json!(completed);
+    result["active_tasks"] = json!(rt.alive());
+    result["elapsed_secs"] = json!(started.elapsed().as_secs_f64());
+    result["rss"] = rss();
+    Ok(result)
+}
+
+fn run<E: Engine>(c: &Config) -> Result<Value, String> {
+    // Read the same RSS source before and after runtime construction.
+    let process_rss = rss();
+    let mut rt = E::new(c.tasks)?;
+    rt.block_on(async {});
+    let runtime_rss = rss();
+    if c.scenario == "soak" {
+        return soak(c, rt);
+    }
+    let mut result = c.record("ok");
+    let metrics;
+    let mut completed = c.tasks;
+    let mut checksum = 0_u64;
+    match c.scenario.as_str() {
+        "spawn_join" => {
+            let started = Instant::now();
+            let mut handles = Vec::with_capacity(c.tasks);
+            for index in 0..c.tasks {
+                handles.push(rt.spawn(async move { index })?);
+            }
+            checksum = rt.block_on(join_indices(handles))?;
+            let ns = started.elapsed().as_nanos().max(1) as u64;
+            metrics = json!({"elapsed_ns": ns, "spawn_join_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64});
+        }
+        "yield" => {
+            let mut handles = Vec::with_capacity(c.tasks);
+            for index in 0..c.tasks {
+                handles.push(rt.spawn(YieldWork {
+                    remaining: c.yields,
+                    index,
+                })?);
+            }
+            let started = Instant::now();
+            checksum = rt.block_on(join_indices(handles))?;
+            let ns = started.elapsed().as_nanos().max(1) as u64;
+            let ops = c.tasks as u64 * c.yields as u64;
+            metrics = json!({"elapsed_ns": ns, "wake_ops": ops,
+                "wake_ops_per_sec": ops as f64 * 1e9 / ns as f64, "yield_ns_per_op": ns as f64 / ops as f64});
+        }
+        "wake_latency" => {
+            let count = c.tasks.min(c.latency_samples);
+            let mut handles = Vec::with_capacity(c.tasks);
+            for index in 0..c.tasks {
+                let sampled = index * count / c.tasks != (index + 1) * count / c.tasks;
+                handles.push(rt.spawn(WakeWork {
+                    index,
+                    sampled,
+                    armed: false,
+                    start: None,
+                })?);
+            }
+            let mut samples = rt.block_on(async {
+                let mut samples = Vec::with_capacity(count);
+                for (i, h) in handles.into_iter().enumerate() {
+                    let (index, ns) = h.await?;
+                    if index != i {
+                        return Err("wake task identity mismatch".to_string());
+                    }
+                    if let Some(ns) = ns {
+                        samples.push(ns);
+                    }
+                }
+                Ok(samples)
+            })?;
+            if samples.len() != count {
+                return Err("missing latency samples".into());
+            }
+            metrics = json!({"wake_p50_ns": percentile(&mut samples, 0.5),
+                "wake_p95_ns": percentile(&mut samples, 0.95), "wake_p99_ns": percentile(&mut samples, 0.99)});
+            result["latency_samples_ns"] = json!(samples);
+            checksum = c.tasks as u64 * (c.tasks as u64 - 1) / 2;
+        }
+        "pending_memory" => {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::with_capacity(c.tasks);
+            for _ in 0..c.tasks {
+                handles.push(rt.spawn(PendingWork {
+                    entered: false,
+                    count: count.clone(),
+                })?);
+            }
+            rt.block_on(poll_fn(|cx| {
+                if count.load(Ordering::Relaxed) == c.tasks {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }));
+            std::thread::sleep(Duration::from_millis(c.hold_ms));
+            let live_rss = rss();
+            let delta = rss_delta(&live_rss, &runtime_rss);
+            metrics = json!({"pending_rss_delta_bytes": delta,
+                "pending_bytes_per_task": delta.map(|v| v as f64 / c.tasks as f64)});
+            result["pending_polled_tasks"] = json!(count.load(Ordering::Relaxed));
+            result["join_handle_bytes"] = json!(std::mem::size_of::<E::Handle<()>>());
+            result["live_rss"] = live_rss;
+            for h in &handles {
+                h.abort();
+            }
+            rt.block_on(async {
+                for h in handles {
+                    match h.await {
+                        Err(error) if error == "cancelled" => {}
+                        Err(error) => return Err(error),
+                        Ok(()) => {
+                            return Err("pending task completed without cancellation".to_string());
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            result["after_cleanup_rss"] = rss();
+            result["cancelled_tasks"] = json!(c.tasks);
+        }
+        "idle" => {
+            completed = 0;
+            metrics = json!({"idle_rss_delta_bytes": rss_delta(&runtime_rss, &process_rss)});
+        }
+        _ => return Err("unhandled scenario".into()),
+    }
+    if rt.alive() != 0 {
+        return Err("tasks remain active after scenario".into());
+    }
+    result["metrics"] = metrics;
+    result["correctness"] = json!(true);
+    result["completed_tasks"] = json!(completed);
+    result["checksum"] = json!(checksum);
+    result["active_tasks"] = json!(rt.alive());
+    result["process_rss"] = process_rss;
+    result["runtime_rss"] = runtime_rss;
+    Ok(result)
+}
+
+fn main() {
+    let c = match Config::parse() {
+        Ok(c) => c,
+        Err(error) => {
+            let _ = emit(&json!({"schema_version": 1, "status": "error", "error": error}));
+            std::process::exit(2);
+        }
+    };
+    if c.workers != 1 {
+        let mut r = c.record("unsupported");
+        r["reason"] = json!("P0 implements only current-thread worker=1");
+        r["supported_workers"] = json!([1]);
+        r["future_worker_matrix"] = json!([1, 2, 4, 8, 16]);
+        let _ = emit(&r);
+        std::process::exit(2);
+    }
+    let result = if c.engine == "zrun" {
+        run::<zrun::Runtime>(&c)
+    } else {
+        run::<tokio::runtime::Runtime>(&c)
+    };
+    match result {
+        Ok(value) => {
+            if let Err(e) = emit(&value) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            let mut r = c.record("error");
+            r["error"] = json!(error);
+            let _ = emit(&r);
+            std::process::exit(1);
+        }
+    }
+}

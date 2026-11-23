@@ -1,0 +1,52 @@
+name: Source gates (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install stable Rust source tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Record compiler
+        run: rustc +stable -Vv
+      - name: Formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Workspace tests
+        run: cargo +stable test --workspace --all-targets --locked
+      - name: Clippy
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - name: Python statistics and evidence tests
+        run: |
+          python scripts/benchmark.py --self-test
+          python scripts/soak.py --self-test
+      - name: Runtime dependency boundary
+        shell: python
+        run: |
+          import subprocess
+          graph = subprocess.check_output(['cargo', '+stable', 'tree', '-p', 'zrun', '--edges', 'normal', '--locked', '--prefix', 'none'], text=True)
+          print(graph)
+          assert not any(line.split()[0] == 'tokio' for line in graph.splitlines() if line.strip()), 'Tokio entered the native runtime dependency graph'
+      - name: Build comparator for source smoke
+        run: cargo +stable build -p zrun-bench --release --locked
+      - name: Comparator protocol smoke (not performance acceptance)
+        shell: python
+        run: |
+          import os, pathlib, subprocess, tempfile
+          binary = pathlib.Path('target/release/zrun-bench' + ('.exe' if os.name == 'nt' else '')).resolve()
+          output = pathlib.Path(tempfile.mkdtemp(prefix='zrun-ci-')) / 'smoke'
+          subprocess.run(['python', 'scripts/benchmark.py', '--binary', str(binary), '--output', str(output), '--tasks', '1000', '--rounds', '1', '--bootstrap', '100'], check=True)
