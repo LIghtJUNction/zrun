@@ -1,0 +1,1230 @@
+{
+  "schema_version": 1,
+  "implementation_commit": "12e6421ddfc898658ab59f97e922979e85d8b597",
+  "design_commit": "b33e0d087102fdf8c33adc12fc2e49fe36a53dfb",
+  "benchmark_environment": {
+    "captured_utc": "2026-11-23T12:58:39Z",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "kernel": "6.18.57",
+    "uname": {
+      "system": "Linux",
+      "node": "dc525466a1a6",
+      "release": "6.18.57",
+      "version": "#1 SMP Tue Oct 20 21:56:04 UTC 2026",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "cpu_detail": null,
+    "logical_cpus": 9,
+    "cpu_affinity": [
+      4
+    ],
+    "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+    "rustc_on_path": {
+      "command": [
+        "rustc",
+        "-Vv"
+      ],
+      "exit_code": 0,
+      "stdout": "rustc 1.100.0 (0ef1bc386 2026-11-09)\nbinary: rustc\ncommit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a\ncommit-date: 2026-11-09\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0\nLLVM version: 23.1.5",
+      "stderr": ""
+    },
+    "governor_cpu0": null,
+    "memory": "MemTotal:       10206468 kB\nMemFree:         6687528 kB\nMemAvailable:    8676024 kB\nBuffers:           45984 kB\nCached:          2111560 kB\nSwapCached:            0 kB\nActive:          1378716 kB\nInactive:        1082804 kB\nActive(anon):     428664 kB\nInactive(anon):   334112 kB\nActive(file):     950052 kB\nInactive(file):   748692 kB\nUnevictable:       29944 kB\nMlocked:               0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nDirty:            328840 kB\nWriteback:             0 kB\nAnonPages:        334204 kB\nMapped:           153056 kB\nShmem:            428736 kB\nKReclaimable:     603452 kB\nSlab:             712488 kB\nSReclaimable:     603452 kB\nSUnreclaim:       109036 kB\nKernelStack:        5712 kB\nPageTables:        10852 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     5103232 kB\nCommitted_AS:    2093124 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:        6992 kB\nVmallocChunk:          0 kB\nPercpu:             2880 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    604160 kB\nFilePmdMapped:         0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      352256 kB\nDirectMap2M:     7122944 kB\nDirectMap1G:    19922944 kB\n",
+    "rustflags": null,
+    "cargo_encoded_rustflags": null,
+    "binary": "/workspace/scratch/91d8c179742d/zrun-validation/target/release/zrun-bench",
+    "binary_sha256": "91988e69c1366eeb07a98de12aebff7a420d595f3d87f158d145226469e0f2d4",
+    "cargo_lock": {
+      "sha256": "d2094b7f6b0b004404c2673ed32b83bbb08943ab22f169cfdd8632ca2d76cb35",
+      "comparator_packages": [
+        {
+          "name": "tokio",
+          "version": "1.54.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3",
+          "dependencies": [
+            "pin-project-lite"
+          ]
+        },
+        {
+          "name": "zrun",
+          "version": "0.1.0",
+          "dependencies": [
+            "zrun-executor",
+            "zrun-sync",
+            "zrun-task",
+            "zrun-time"
+          ]
+        },
+        {
+          "name": "zrun-bench",
+          "version": "0.1.0",
+          "dependencies": [
+            "serde_json",
+            "tokio",
+            "zrun"
+          ]
+        }
+      ]
+    },
+    "source_head": {
+      "command": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "exit_code": 128,
+      "stdout": "HEAD",
+      "stderr": "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'"
+    },
+    "source_dirty": {
+      "command": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "exit_code": 0,
+      "stdout": "?? .github/\n?? .gitignore\n?? AGENTS.md\n?? Cargo.lock\n?? Cargo.toml\n?? LICENSE\n?? README.md\n?? crates/\n?? docs/\n?? examples/\n?? rust-toolchain.toml\n?? scripts/\n?? src/\n?? tests/",
+      "stderr": ""
+    },
+    "source_identity_note": "HEAD/dirty describe collection checkout; build metadata and binary hash identify executable."
+  },
+  "benchmark_config": {
+    "binary": "/workspace/scratch/91d8c179742d/zrun-validation/target/release/zrun-bench",
+    "output": "/workspace/scratch/91d8c179742d/zrun-evidence/p0-single-worker-10rounds",
+    "tasks": [
+      1000,
+      10000,
+      100000,
+      1000000
+    ],
+    "workers": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "scenarios": [
+      "spawn_join",
+      "yield",
+      "wake_latency",
+      "pending_memory",
+      "idle"
+    ],
+    "rounds": 10,
+    "bootstrap": 5000,
+    "seed": 20261123,
+    "yields": 16,
+    "latency_samples": 10000,
+    "hold_ms": 20,
+    "timeout": 120,
+    "affinity": "4",
+    "self_test": false
+  },
+  "benchmark_samples": 400,
+  "benchmark_status": "completed",
+  "metrics": [
+    {
+      "workers": 1,
+      "tasks": 1000,
+      "metric": "spawn_join_ops_per_sec",
+      "scenario": "spawn_join",
+      "unit": "tasks/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 1231715.8142385324,
+          "p95": 1273329.4937970496,
+          "p99": 1276872.0496293711,
+          "median_bootstrap_95_ci": [
+            1191023.7216091738,
+            1258922.6924262333
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2082657.3620775798,
+          "p95": 2478297.7279687696,
+          "p99": 2527555.228069416,
+          "median_bootstrap_95_ci": [
+            1930990.4442265215,
+            2303221.750624757
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.5914154851712236,
+      "ratio_bootstrap_95_ci": [
+        0.5436442816397228,
+        0.6426071439370978
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000,
+      "metric": "wake_ops_per_sec",
+      "scenario": "yield",
+      "unit": "wakes/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 4339584.113183714,
+          "p95": 4699539.142882615,
+          "p99": 4709596.352172123,
+          "median_bootstrap_95_ci": [
+            3994656.148737027,
+            4622933.332100552
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 12141064.320616588,
+          "p95": 14244254.988444805,
+          "p99": 14364768.604897205,
+          "median_bootstrap_95_ci": [
+            9957022.9994785,
+            13231748.671860129
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.3574302877067146,
+      "ratio_bootstrap_95_ci": [
+        0.31864386182240134,
+        0.44306086666892763
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000,
+      "metric": "wake_p99_ns",
+      "scenario": "wake_latency",
+      "unit": "ns",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 554316.55,
+          "p95": 1235120.4564999992,
+          "p99": 1528868.9473,
+          "median_bootstrap_95_ci": [
+            516972.68999999994,
+            698519.065
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2428.5550000000003,
+          "p95": 2711.653499999999,
+          "p99": 2752.970699999999,
+          "median_bootstrap_95_ci": [
+            2418.035,
+            2539.858374999999
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 1.0,
+      "challenge_threshold": 0.7,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 228.2495352174441,
+      "ratio_bootstrap_95_ci": [
+        209.8598913289015,
+        288.0479111426344
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000,
+      "metric": "pending_bytes_per_task",
+      "scenario": "pending_memory",
+      "unit": "bytes/task",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 360.448,
+          "p95": 360.448,
+          "p99": 360.448,
+          "median_bootstrap_95_ci": [
+            360.448,
+            360.448
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 266.24,
+          "p95": 266.24,
+          "p99": 266.24,
+          "median_bootstrap_95_ci": [
+            266.24,
+            266.24
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.85,
+      "challenge_threshold": 0.6,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 1.3538461538461537,
+      "ratio_bootstrap_95_ci": [
+        1.3538461538461537,
+        1.3538461538461537
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000,
+      "metric": "idle_rss_delta_bytes",
+      "scenario": "idle",
+      "unit": "bytes",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 98304.0,
+          "p95": 134348.79999999993,
+          "p99": 157941.76,
+          "median_bootstrap_95_ci": [
+            98304.0,
+            98304.0
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 122880.0,
+          "p95": 184320.0,
+          "p99": 184320.0,
+          "median_bootstrap_95_ci": [
+            118784.0,
+            184320.0
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.8,
+      "challenge_threshold": 0.5,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.8,
+      "ratio_bootstrap_95_ci": [
+        0.5333333333333333,
+        0.8275862068965517
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": true,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 10000,
+      "metric": "spawn_join_ops_per_sec",
+      "scenario": "spawn_join",
+      "unit": "tasks/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 1116388.2936961995,
+          "p95": 1181397.3593095476,
+          "p99": 1187608.752373953,
+          "median_bootstrap_95_ci": [
+            1036336.0803594631,
+            1155503.0547949506
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2222957.150872657,
+          "p95": 2435408.64341326,
+          "p99": 2455207.924934356,
+          "median_bootstrap_95_ci": [
+            1932173.43819595,
+            2374071.5303003937
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.5022086427792563,
+      "ratio_bootstrap_95_ci": [
+        0.4692502297389297,
+        0.5335793585605596
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 10000,
+      "metric": "wake_ops_per_sec",
+      "scenario": "yield",
+      "unit": "wakes/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 4510712.249744356,
+          "p95": 4599780.874193609,
+          "p99": 4605153.915927669,
+          "median_bootstrap_95_ci": [
+            4268085.02571863,
+            4564951.229300694
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 12773873.20904845,
+          "p95": 14088643.201615134,
+          "p99": 14139395.232101588,
+          "median_bootstrap_95_ci": [
+            10134598.260598978,
+            13779830.857743658
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.3531201676989533,
+      "ratio_bootstrap_95_ci": [
+        0.3234076897061319,
+        0.4222857333080248
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 10000,
+      "metric": "wake_p99_ns",
+      "scenario": "wake_latency",
+      "unit": "ns",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 5508223.015000001,
+          "p95": 6301745.4365,
+          "p99": 6570704.9753,
+          "median_bootstrap_95_ci": [
+            5293228.03,
+            5831641.545
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2648.0300000000007,
+          "p95": 2717.890000000001,
+          "p99": 2727.610000000001,
+          "median_bootstrap_95_ci": [
+            2563.545000000001,
+            2699.0300000000007
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 1.0,
+      "challenge_threshold": 0.7,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 2080.121076800489,
+      "ratio_bootstrap_95_ci": [
+        1972.8098650255827,
+        2210.4357451850124
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 10000,
+      "metric": "pending_bytes_per_task",
+      "scenario": "pending_memory",
+      "unit": "bytes/task",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 349.7984,
+          "p95": 349.7984,
+          "p99": 349.7984,
+          "median_bootstrap_95_ci": [
+            349.7984,
+            349.7984
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 264.192,
+          "p95": 264.192,
+          "p99": 264.192,
+          "median_bootstrap_95_ci": [
+            264.192,
+            264.192
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.85,
+      "challenge_threshold": 0.6,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 1.324031007751938,
+      "ratio_bootstrap_95_ci": [
+        1.324031007751938,
+        1.324031007751938
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 10000,
+      "metric": "idle_rss_delta_bytes",
+      "scenario": "idle",
+      "unit": "bytes",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 98304.0,
+          "p95": 163840.0,
+          "p99": 163840.0,
+          "median_bootstrap_95_ci": [
+            98304.0,
+            131072.0
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 118784.0,
+          "p95": 184320.0,
+          "p99": 184320.0,
+          "median_bootstrap_95_ci": [
+            118784.0,
+            184320.0
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.8,
+      "challenge_threshold": 0.5,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.8275862068965517,
+      "ratio_bootstrap_95_ci": [
+        0.5333333333333333,
+        0.8421052631578947
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 100000,
+      "metric": "spawn_join_ops_per_sec",
+      "scenario": "spawn_join",
+      "unit": "tasks/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 948916.1825529104,
+          "p95": 1055478.0199681562,
+          "p99": 1067476.2548307225,
+          "median_bootstrap_95_ci": [
+            651771.0816757675,
+            1001146.5230096158
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2125956.444697116,
+          "p95": 2370186.014133736,
+          "p99": 2378614.04620537,
+          "median_bootstrap_95_ci": [
+            1994956.8204506407,
+            2312099.008333799
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.44634789434178745,
+      "ratio_bootstrap_95_ci": [
+        0.2998188196906973,
+        0.4983844244911105
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 100000,
+      "metric": "wake_ops_per_sec",
+      "scenario": "yield",
+      "unit": "wakes/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 4291258.052582063,
+          "p95": 4372574.739621523,
+          "p99": 4385506.020445016,
+          "median_bootstrap_95_ci": [
+            4132192.3561677914,
+            4348335.385738577
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 12406921.323877074,
+          "p95": 13274810.614110611,
+          "p99": 13346848.275952484,
+          "median_bootstrap_95_ci": [
+            11461562.225544835,
+            12946728.694228062
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.3458761396611384,
+      "ratio_bootstrap_95_ci": [
+        0.3231077419002769,
+        0.36725574779369247
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 100000,
+      "metric": "wake_p99_ns",
+      "scenario": "wake_latency",
+      "unit": "ns",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 55366724.35,
+          "p95": 71500270.87349997,
+          "p99": 79811556.8787,
+          "median_bootstrap_95_ci": [
+            53569710.1,
+            57425459.955
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2830.1150000000025,
+          "p95": 3385.7335000000007,
+          "p99": 3689.2027000000016,
+          "median_bootstrap_95_ci": [
+            2588.0200000000004,
+            2902.1200000000026
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 1.0,
+      "challenge_threshold": 0.7,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 19563.418571330123,
+      "ratio_bootstrap_95_ci": [
+        18505.316146472218,
+        21631.38206621278
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 100000,
+      "metric": "pending_bytes_per_task",
+      "scenario": "pending_memory",
+      "unit": "bytes/task",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 342.46656,
+          "p95": 342.46656,
+          "p99": 342.46656,
+          "median_bootstrap_95_ci": [
+            342.46656,
+            342.46656
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 264.06912,
+          "p95": 264.06912,
+          "p99": 264.06912,
+          "median_bootstrap_95_ci": [
+            264.06912,
+            264.06912
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.85,
+      "challenge_threshold": 0.6,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 1.296882270823639,
+      "ratio_bootstrap_95_ci": [
+        1.296882270823639,
+        1.296882270823639
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 100000,
+      "metric": "idle_rss_delta_bytes",
+      "scenario": "idle",
+      "unit": "bytes",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 98304.0,
+          "p95": 163840.0,
+          "p99": 163840.0,
+          "median_bootstrap_95_ci": [
+            98304.0,
+            163840.0
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 118784.0,
+          "p95": 125132.79999999999,
+          "p99": 126607.36,
+          "median_bootstrap_95_ci": [
+            118784.0,
+            120832.0
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.8,
+      "challenge_threshold": 0.5,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.8275862068965517,
+      "ratio_bootstrap_95_ci": [
+        0.8135593220338984,
+        1.3793103448275863
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000000,
+      "metric": "spawn_join_ops_per_sec",
+      "scenario": "spawn_join",
+      "unit": "tasks/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 609541.9545288233,
+          "p95": 705272.6025635551,
+          "p99": 728609.8782892991,
+          "median_bootstrap_95_ci": [
+            527398.4434689137,
+            663610.3089623803
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 1950122.119824697,
+          "p95": 2208195.556383497,
+          "p99": 2236653.6276376247,
+          "median_bootstrap_95_ci": [
+            1159241.512437615,
+            2133515.7797101345
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.3125660430863771,
+      "ratio_bootstrap_95_ci": [
+        0.2548803482069653,
+        0.49769936567070583
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000000,
+      "metric": "wake_ops_per_sec",
+      "scenario": "yield",
+      "unit": "wakes/s",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 2790091.951770534,
+          "p95": 3008172.248785204,
+          "p99": 3058682.7787991036,
+          "median_bootstrap_95_ci": [
+            2633840.634156843,
+            2918104.82932636
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 12206003.992270917,
+          "p95": 12802894.820816824,
+          "p99": 12825178.141785972,
+          "median_bootstrap_95_ci": [
+            11536771.27112699,
+            12592522.49654931
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "higher",
+      "normal_threshold": 1.2,
+      "challenge_threshold": 2.0,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.22858356867139115,
+      "ratio_bootstrap_95_ci": [
+        0.21033541899572847,
+        0.24308880285842738
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000000,
+      "metric": "wake_p99_ns",
+      "scenario": "wake_latency",
+      "unit": "ns",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 702557644.46,
+          "p95": 750099757.5184999,
+          "p99": 768165337.2317,
+          "median_bootstrap_95_ci": [
+            668106056.61,
+            721956004.47
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 2850.5650000000014,
+          "p95": 2919.106500000002,
+          "p99": 2926.3173000000024,
+          "median_bootstrap_95_ci": [
+            2811.505,
+            2885.630000000003
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 1.0,
+      "challenge_threshold": 0.7,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 246462.5940681934,
+      "ratio_bootstrap_95_ci": [
+        234278.92125386017,
+        252379.78938987319
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000000,
+      "metric": "pending_bytes_per_task",
+      "scenario": "pending_memory",
+      "unit": "bytes/task",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 355.672064,
+          "p95": 355.672064,
+          "p99": 355.672064,
+          "median_bootstrap_95_ci": [
+            355.672064,
+            355.672064
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 264.00768,
+          "p95": 264.00768,
+          "p99": 264.00768,
+          "median_bootstrap_95_ci": [
+            264.00768,
+            264.00768
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.85,
+      "challenge_threshold": 0.6,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 1.34720347529284,
+      "ratio_bootstrap_95_ci": [
+        1.34720347529284,
+        1.34720347529284
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    },
+    {
+      "workers": 1,
+      "tasks": 1000000,
+      "metric": "idle_rss_delta_bytes",
+      "scenario": "idle",
+      "unit": "bytes",
+      "engines": {
+        "zrun": {
+          "n": 10,
+          "missing": 0,
+          "median": 98304.0,
+          "p95": 134348.79999999993,
+          "p99": 157941.76,
+          "median_bootstrap_95_ci": [
+            98304.0,
+            98304.0
+          ]
+        },
+        "tokio": {
+          "n": 10,
+          "missing": 0,
+          "median": 118784.0,
+          "p95": 184320.0,
+          "p99": 184320.0,
+          "median_bootstrap_95_ci": [
+            118784.0,
+            151552.0
+          ]
+        }
+      },
+      "ratio_definition": "median(zrun) / median(tokio)",
+      "direction": "lower",
+      "normal_threshold": 0.8,
+      "challenge_threshold": 0.5,
+      "pairs": 10,
+      "expected_pairs": 10,
+      "ratio": 0.8275862068965517,
+      "ratio_bootstrap_95_ci": [
+        0.6486486486486487,
+        0.8275862068965517
+      ],
+      "normal_pass": false,
+      "challenge_pass": false,
+      "normal_point_pass": false,
+      "challenge_point_pass": false,
+      "status": "evaluated"
+    }
+  ],
+  "unsupported": [
+    {
+      "metric": "scheduler_cpu_overhead",
+      "reason": "yield_ns_per_op is wall time including harness, not isolated CPU overhead",
+      "normal_ratio_max": 0.85,
+      "challenge_ratio_max": 0.5
+    },
+    {
+      "metric": "tcp_throughput",
+      "reason": "P0 has no TCP reactor",
+      "normal_ratio_min": 0.95,
+      "challenge_ratio_min": 1.2
+    },
+    {
+      "metric": "tcp_p99",
+      "reason": "P0 has no TCP reactor",
+      "normal_ratio_max": 1.1,
+      "challenge_ratio_max": 0.8
+    },
+    {
+      "workers": [
+        2,
+        4,
+        8,
+        16
+      ],
+      "reason": "P0 current-thread executor only"
+    }
+  ],
+  "source_provenance": {
+    "verified_utc": "2026-11-23T12:59:54.753881+00:00",
+    "commit": "12e6421ddfc898658ab59f97e922979e85d8b597",
+    "tracked_files_clean": true,
+    "binary_sha256": "91988e69c1366eeb07a98de12aebff7a420d595f3d87f158d145226469e0f2d4",
+    "cargo_lock_sha256": "d2094b7f6b0b004404c2673ed32b83bbb08943ab22f169cfdd8632ca2d76cb35",
+    "note": "Host commits existed before collection; the local collection checkout imported the exact host Git bundle after sampling began. Original benchmark environment source_head/source_dirty errors are retained; this independent check proves current tracked sources match the frozen implementation. No source files changed during collection."
+  },
+  "soak": {
+    "schema_version": 1,
+    "status": "ok",
+    "config": {
+      "binary": "/workspace/scratch/91d8c179742d/zrun-validation/target/release/zrun-bench",
+      "output": "/workspace/scratch/91d8c179742d/zrun-evidence/p0-soak-120s",
+      "duration_seconds": 120,
+      "engine": "zrun",
+      "tasks": 10000,
+      "workers": 1,
+      "yields": 16,
+      "sample_seconds": 5,
+      "grace_seconds": 30,
+      "max_log_mib": 256,
+      "affinity": "4",
+      "self_test": false
+    },
+    "duration_24h_covered": false,
+    "full_soak_gate": "not_evaluated",
+    "process": {
+      "command": [
+        "/workspace/scratch/91d8c179742d/zrun-validation/target/release/zrun-bench",
+        "--engine",
+        "zrun",
+        "--scenario",
+        "soak",
+        "--tasks",
+        "10000",
+        "--workers",
+        "1",
+        "--yields",
+        "16",
+        "--duration-secs",
+        "120",
+        "--sample-interval-ms",
+        "5000"
+      ],
+      "stdout": "runtime-events.jsonl",
+      "stderr": "runtime-stderr.txt",
+      "started_utc": "2026-11-23T13:03:32Z",
+      "load_average": [
+        0.80712890625,
+        1.53076171875,
+        4.05908203125
+      ],
+      "cpu_affinity": [
+        4
+      ],
+      "pid": 10,
+      "exit_code": 0,
+      "status": "ok",
+      "wall_elapsed_secs": 120.02388221000001
+    },
+    "event_counts": {
+      "start": 1,
+      "sample": 24,
+      "finish": 1
+    },
+    "finish": {
+      "active_tasks": 0,
+      "build": {
+        "comparator": "0.1.0",
+        "encoded_rustflags": "",
+        "opt_level": "3",
+        "profile": "release",
+        "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09) | binary: rustc | commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a | commit-date: 2026-11-09 | host: x86_64-unknown-linux-gnu | release: 1.100.0 | LLVM version: 23.1.5 |",
+        "target": "x86_64-unknown-linux-gnu",
+        "tokio": "1.54.1"
+      },
+      "completed_tasks": 29950000,
+      "config": {
+        "duration_secs": 120,
+        "hold_ms": 20,
+        "latency_samples": 10000,
+        "sample_interval_ms": 5000,
+        "timer_enabled": true,
+        "yields": 16
+      },
+      "correctness": true,
+      "cycles": 2995,
+      "elapsed_secs": 120.001772727,
+      "engine": "zrun",
+      "event": "finish",
+      "rss": {
+        "available": true,
+        "bytes": 5300224,
+        "source": "proc_status_vmrss"
+      },
+      "scenario": "soak",
+      "schema_version": 1,
+      "status": "ok",
+      "tasks": 10000,
+      "workers": 1
+    },
+    "event_errors": [],
+    "rss_trend": {
+      "samples": 24,
+      "warmup_seconds": 0.0,
+      "slope_bytes_per_sec": 10525.057042984667,
+      "first_bytes": 8192,
+      "last_bytes": 5300224,
+      "min_bytes": 8192,
+      "max_bytes": 5300224,
+      "delta_bytes": 5292032
+    },
+    "rss_after_warmup": {
+      "samples": 18,
+      "warmup_seconds": 30.0,
+      "slope_bytes_per_sec": 0.0,
+      "first_bytes": 5300224,
+      "last_bytes": 5300224,
+      "min_bytes": 5300224,
+      "max_bytes": 5300224,
+      "delta_bytes": 0
+    },
+    "rss_note": "OLS slope is descriptive; allocator retention and page residency affect RSS. No leak-free verdict is inferred from slope.",
+    "workload_scope": "Repeated spawn, self-wake/yield, join, exact task identities and zero live tasks after every batch. No TCP or timer/cancellation stress."
+  },
+  "raw_sha256": {
+    "benchmark_report": "09e0b6283f2229282fbb0a90f46c9b5f5733a954180dd680760f1da8c7b32c8e",
+    "soak_report": "ec2a76931cec438fa7c6679529b05fa70d0a3cc5da3deaf66c2edbb748a8feed"
+  }
+}
