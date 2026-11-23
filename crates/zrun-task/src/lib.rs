@@ -13,6 +13,7 @@ use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
@@ -119,7 +120,7 @@ impl<T: Send + 'static> Completion for CompletionCell<T> {
 #[doc(hidden)]
 pub trait Scheduler: Send + Sync {
     fn enqueue(&self, task: Arc<Task>);
-    fn finished(&self, task_id: u64);
+    fn finished(&self, task: &Task);
 }
 
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -246,6 +247,7 @@ struct TaskState {
 #[doc(hidden)]
 pub struct Task {
     id: u64,
+    registry_index: AtomicUsize,
     state: Mutex<TaskState>,
     scheduler: Weak<dyn Scheduler>,
     completion: Arc<dyn Completion>,
@@ -274,6 +276,7 @@ impl Task {
         };
         let task = Arc::new(Self {
             id,
+            registry_index: AtomicUsize::new(usize::MAX),
             state: Mutex::new(TaskState {
                 schedule: ScheduleState::new(),
                 future: Some(Box::pin(wrapped)),
@@ -290,6 +293,21 @@ impl Task {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// A scheduler-owned lookup hint, not the task's identity. The scheduler
+    /// reads and changes it under its registry lock and checks the allocation
+    /// at that index before removal or enqueue. Moving a registry entry never
+    /// moves this Task allocation or changes its monotonically assigned id.
+    pub fn registry_index(&self) -> usize {
+        self.registry_index.load(Ordering::Relaxed)
+    }
+
+    /// Update the hint while holding the owning scheduler's registry lock.
+    /// That lock publishes entries and moves; this atomic only makes storage
+    /// thread-safe and does not synchronize future ownership or scheduling.
+    pub fn set_registry_index(&self, index: usize) {
+        self.registry_index.store(index, Ordering::Relaxed);
     }
 
     fn schedule(self: &Arc<Self>) {
@@ -314,7 +332,7 @@ impl Task {
 
     fn finished(&self) {
         if let Some(scheduler) = self.scheduler.upgrade() {
-            scheduler.finished(self.id);
+            scheduler.finished(self);
         }
     }
 
@@ -516,7 +534,7 @@ mod tests {
         fn enqueue(&self, task: Arc<Task>) {
             lock(&self.queue).push_back(task);
         }
-        fn finished(&self, _id: u64) {
+        fn finished(&self, _task: &Task) {
             self.finished.fetch_add(1, Ordering::SeqCst);
         }
     }

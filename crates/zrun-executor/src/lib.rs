@@ -2,9 +2,9 @@
 //!
 //! Only block_on polls tasks. Spawner and task wakers can be used on other
 //! threads. A runtime admits 65,536 active tasks and timer entries by default;
-//! with_max_tasks sets both limits. Maps and queues grow lazily to that bound.
+//! with_max_tasks sets both limits. Registries and queues grow lazily to that bound.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::pin::pin;
@@ -118,7 +118,7 @@ impl Wake for RootSignal {
 struct SchedulerState {
     closed: bool,
     next_id: u64,
-    tasks: HashMap<u64, Arc<Task>>,
+    tasks: Vec<Arc<Task>>,
     ready: VecDeque<Arc<Task>>,
 }
 
@@ -150,7 +150,8 @@ impl Shared {
                 state.next_id = next_id;
                 let scheduler: Arc<dyn Scheduler> = self.clone();
                 let (task, join) = Task::new(id, future, Arc::downgrade(&scheduler));
-                state.tasks.insert(id, task.clone());
+                task.set_registry_index(state.tasks.len());
+                state.tasks.push(task.clone());
                 state.ready.push_back(task);
                 Ok(join)
             } else {
@@ -176,7 +177,12 @@ impl Scheduler for Shared {
     fn enqueue(&self, task: Arc<Task>) {
         let queued = {
             let mut state = lock(&self.state);
-            if !state.closed && state.tasks.contains_key(&task.id()) {
+            if !state.closed
+                && state
+                    .tasks
+                    .get(task.registry_index())
+                    .is_some_and(|registered| Arc::ptr_eq(registered, &task))
+            {
                 // Task's lock serialized Idle/Running -> Queued and gives
                 // exactly one caller this insertion responsibility.
                 state.ready.push_back(task);
@@ -190,8 +196,27 @@ impl Scheduler for Shared {
         }
     }
 
-    fn finished(&self, task_id: u64) {
-        let removed = { lock(&self.state).tasks.remove(&task_id) };
+    fn finished(&self, task: &Task) {
+        let removed = {
+            let mut state = lock(&self.state);
+            let index = task.registry_index();
+            if !state
+                .tasks
+                .get(index)
+                .is_some_and(|registered| std::ptr::eq(registered.as_ref(), task))
+            {
+                // Shutdown has already detached the entire registry. A stale
+                // callback also cannot remove a different task at a reused slot.
+                return;
+            }
+            let removed = state.tasks.swap_remove(index);
+            removed.set_registry_index(usize::MAX);
+            if let Some(moved) = state.tasks.get(index) {
+                moved.set_registry_index(index);
+            }
+            removed
+        };
+        // A task's destructor may call back into the runtime.
         drop(removed);
     }
 }
@@ -248,7 +273,7 @@ impl Runtime {
                 state: Mutex::new(SchedulerState {
                     closed: false,
                     next_id: 0,
-                    tasks: HashMap::new(),
+                    tasks: Vec::new(),
                     ready: VecDeque::new(),
                 }),
                 max_tasks,
@@ -358,7 +383,7 @@ impl Runtime {
         // Do not hold scheduler state while completing timers or tasks:
         // their wakers and destructors can re-enter spawn and join code.
         self.driver.shutdown();
-        for (_, task) in tasks {
+        for task in tasks {
             task.shutdown();
         }
         drop(ready);
@@ -500,6 +525,115 @@ mod tests {
         let second = runtime.spawn(async { 23 }).unwrap();
         assert_eq!(runtime.block_on(second), Ok(23));
         assert_eq!(runtime.stats(), RuntimeStats::default());
+    }
+
+    #[test]
+    fn non_fifo_completion_keeps_moved_tasks_wakeable_and_capacity_reusable() {
+        let mut runtime = Runtime::with_max_tasks(3).unwrap();
+        let rounds = if cfg!(miri) { 4 } else { 64 };
+        for _ in 0..rounds {
+            let entered = Arc::new(AtomicUsize::new(0));
+            let mut senders = Vec::new();
+            let mut joins = Vec::new();
+            for _ in 0..3 {
+                let (sender, receiver) = zrun_sync::channel::<usize>();
+                let entered = entered.clone();
+                senders.push(Some(sender));
+                joins.push(Some(
+                    runtime
+                        .spawn(async move {
+                            entered.fetch_add(1, Ordering::Release);
+                            receiver.await.unwrap()
+                        })
+                        .unwrap(),
+                ));
+            }
+            runtime.block_on(with_timeout(
+                runtime.timer(),
+                poll_fn(|cx| {
+                    if entered.load(Ordering::Acquire) == 3 {
+                        Poll::Ready(())
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }),
+            ));
+
+            // Retire a middle entry, then wake the task whose registration
+            // moved. Its Future and result identity must remain unchanged.
+            senders[1].take().unwrap().send(11).unwrap();
+            assert_eq!(runtime.block_on(joins[1].take().unwrap()), Ok(11));
+            let (replacement_sender, replacement_receiver) = zrun_sync::channel();
+            let replacement = runtime
+                .spawn(async move { replacement_receiver.await.unwrap() })
+                .unwrap();
+            assert!(matches!(
+                runtime.spawn(async {}),
+                Err(SpawnError::AtCapacity { capacity: 3 })
+            ));
+
+            senders[2].take().unwrap().send(12).unwrap();
+            joins[0].as_ref().unwrap().abort();
+            let (cancelled, completed) = runtime.block_on(async {
+                (
+                    joins[0].take().unwrap().await,
+                    joins[2].take().unwrap().await,
+                )
+            });
+            assert_eq!(cancelled, Err(JoinError::Cancelled));
+            assert_eq!(completed, Ok(12));
+            assert_eq!(senders[0].take().unwrap().send(10), Err(10));
+            assert_eq!(runtime.stats().active_tasks, 1);
+
+            // This pending replacement survives further non-last removals.
+            replacement_sender.send(99).unwrap();
+            assert_eq!(runtime.block_on(replacement), Ok(99));
+            assert_eq!(runtime.stats(), RuntimeStats::default());
+        }
+    }
+
+    #[test]
+    fn old_wakers_do_not_wake_a_new_task_after_registry_reuse() {
+        let mut runtime = Runtime::with_max_tasks(1).unwrap();
+        let (first, first_drops, _, first_saved) = pending_drop();
+        let first = runtime.spawn(first).unwrap();
+        runtime.block_on(with_timeout(
+            runtime.timer(),
+            poll_fn(|cx| {
+                if lock(&first_saved).is_some() {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }),
+        ));
+        let old_waker = lock(&first_saved).take().unwrap();
+        first.abort();
+        assert_eq!(runtime.block_on(first), Err(JoinError::Cancelled));
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+
+        let (second, second_drops, _, second_saved) = pending_drop();
+        let second = runtime.spawn(second).unwrap();
+        runtime.block_on(with_timeout(
+            runtime.timer(),
+            poll_fn(|cx| {
+                if lock(&second_saved).is_some() {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }),
+        ));
+        old_waker.wake_by_ref();
+        old_waker.wake();
+        assert_eq!(runtime.stats().queued_tasks, 0);
+        assert_eq!(runtime.stats().active_tasks, 1);
+        runtime.shutdown();
+        assert_eq!(runtime.block_on(second), Err(JoinError::Shutdown));
+        assert_eq!(second_drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
