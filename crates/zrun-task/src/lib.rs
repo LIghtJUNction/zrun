@@ -339,11 +339,30 @@ impl Task {
     /// Run at most one poll. Repeated or stale runnable entries are harmless;
     /// only the Queued -> Running transition can extract the future.
     pub fn run_once(self: &Arc<Self>) {
+        self.run_budget(0);
+    }
+
+    /// Poll and immediately drive a bounded number of notifications observed
+    /// during those polls. The final notification is published as usual.
+    ///
+    /// Between polls the task is Queued and the driver owns the single runnable
+    /// reservation. Cancellation and shutdown retain the same phase checks.
+    pub fn run_budget(self: &Arc<Self>, inline_repolls: usize) {
+        for _ in 0..=inline_repolls {
+            if !self.poll_once() {
+                return;
+            }
+        }
+        self.enqueue();
+    }
+
+    // True transfers a queued runnable reservation back to the driver.
+    fn poll_once(self: &Arc<Self>) -> bool {
         let (mut future, cancelled) = {
             let mut state = lock(&self.state);
             let action = state.schedule.begin();
             match action {
-                Begin::Skip => return,
+                Begin::Skip => return false,
                 Begin::Poll => (
                     state.future.take().expect("a runnable owns one future"),
                     None,
@@ -360,7 +379,7 @@ impl Task {
 
         if let Some(reason) = cancelled {
             self.finish_failure(future, reason.error());
-            return;
+            return false;
         }
 
         let waker = task_waker(self.clone());
@@ -381,10 +400,11 @@ impl Task {
                     }
                 };
                 match action {
-                    Pending::Requeue => self.enqueue(),
-                    Pending::Idle => {}
+                    Pending::Requeue => true,
+                    Pending::Idle => false,
                     Pending::Cancel(reason) => {
                         self.finish_failure(terminal_future.unwrap(), reason.error());
+                        false
                     }
                 }
             }
@@ -394,10 +414,12 @@ impl Task {
                 // cannot replace that already delivered result.
                 let _ = drop_future(future);
                 self.finished();
+                false
             }
             Err(payload) => {
                 lock(&self.state).schedule.complete();
                 self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
+                false
             }
         }
     }

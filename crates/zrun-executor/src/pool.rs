@@ -12,7 +12,9 @@ use std::thread::{self, JoinHandle as WorkerThread};
 use zrun_task::{JoinHandle, Scheduler, Task};
 use zrun_time::{Driver, Timer};
 
-use crate::{DEFAULT_MAX_TASKS, Parker, Runtime, RuntimeStats, SpawnError, lock, remove_task};
+use crate::{
+    DEFAULT_MAX_TASKS, INLINE_REPOLLS, Parker, Runtime, RuntimeStats, SpawnError, lock, remove_task,
+};
 
 const MAX_WORKERS: usize = 256;
 const STEAL_LIMIT: usize = 8;
@@ -158,7 +160,7 @@ impl SharedPool {
                 self.clock.turn();
             }
             if let Some(task) = self.take(own) {
-                task.run_once();
+                task.run_budget(INLINE_REPOLLS);
                 continue;
             }
             worker.parker.parking.arm();
@@ -167,7 +169,7 @@ impl SharedPool {
             }
             if let Some(task) = self.take(own) {
                 worker.parker.parking.disarm();
-                task.run_once();
+                task.run_budget(INLINE_REPOLLS);
                 continue;
             }
             if own == 0 {

@@ -23,6 +23,7 @@ pub use pool::{Pool, PoolSpawner};
 
 pub const DEFAULT_MAX_TASKS: usize = 65_536;
 const TASK_TURN_BUDGET: usize = 64;
+const INLINE_REPOLLS: usize = 2;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -346,7 +347,7 @@ impl Runtime {
                 let Some(task) = self.shared.pop() else {
                     break;
                 };
-                task.run_once();
+                task.run_budget(INLINE_REPOLLS);
                 // Poll at least one available task even if the root wakes
                 // itself on every poll; neither side can starve the other.
                 if signal.notified.load(Ordering::Acquire) {
