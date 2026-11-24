@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::task::Poll;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::execution::{Broker, Delivery, Request};
@@ -346,16 +346,15 @@ pub(crate) fn run_remote(
         while offset < requests.len() {
             let mut count = MAX_BATCH_COMMANDS.min(requests.len() - offset);
             let payload = loop {
-                let request = json!({
-                    "jsonrpc":"2.0", "id":offset, "method":"tools/call",
-                    "params":{"name":"shell_batch","arguments":{"commands": &requests[offset..offset + count]}}
-                });
-                let bytes = serde_json::to_vec(&request)?;
+                let bytes = remote_payload(offset, &requests[offset..offset + count])?;
                 if bytes.len() <= MAX_MESSAGE {
                     break bytes;
                 }
                 if count == 1 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "encoded request exceeds the socket message limit"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "encoded request exceeds the socket message limit",
+                    ));
                 }
                 count /= 2;
             };
@@ -369,6 +368,55 @@ pub(crate) fn run_remote(
     })?
 }
 
+#[derive(Serialize)]
+struct RemoteCall<'a> {
+    jsonrpc: &'static str,
+    id: usize,
+    method: &'static str,
+    params: RemoteParams<'a>,
+}
+
+#[derive(Serialize)]
+struct RemoteParams<'a> {
+    name: &'static str,
+    arguments: RemoteCommands<'a>,
+}
+
+#[derive(Serialize)]
+struct RemoteCommands<'a> {
+    commands: &'a [Request],
+}
+
+fn remote_payload(id: usize, commands: &[Request]) -> io::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&RemoteCall {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: RemoteParams {
+            name: "shell_batch",
+            arguments: RemoteCommands { commands },
+        },
+    })?)
+}
+
+#[derive(Deserialize)]
+struct RemoteReply {
+    id: Option<u64>,
+    result: Option<RemoteResult>,
+    error: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct RemoteResult {
+    #[serde(rename = "structuredContent")]
+    content: RemoteDeliveries,
+}
+
+#[derive(Deserialize)]
+struct RemoteDeliveries {
+    commands: Vec<Delivery>,
+}
+
 async fn remote_records(
     io: &zrun::io::Handle,
     path: &std::path::Path,
@@ -380,15 +428,18 @@ async fn remote_records(
     let body = http::post(io, path, payload, timer)
         .await?
         .ok_or_else(|| io::Error::other("missing command response"))?;
-    let mut response: Value = serde_json::from_slice(&body)?;
-    if let Some(error) = response.get("error") {
+    let response: RemoteReply = serde_json::from_slice(&body)?;
+    if let Some(error) = response.error {
         return Err(io::Error::other(format!(
             "MCP command request failed: {error}"
         )));
     }
-    let records: Vec<Delivery> =
-        serde_json::from_value(response["result"]["structuredContent"]["commands"].take())?;
-    if records.len() != count || response.get("id").and_then(Value::as_u64) != Some(id as u64) {
+    let records = response
+        .result
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MCP command result"))?
+        .content
+        .commands;
+    if records.len() != count || response.id != Some(id as u64) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unexpected MCP command result",
@@ -403,10 +454,7 @@ pub(crate) async fn remote_one(
     request: Request,
     timer: &zrun::Timer,
 ) -> io::Result<Delivery> {
-    let payload = serde_json::to_vec(&json!({
-        "jsonrpc":"2.0", "id":0, "method":"tools/call",
-        "params":{"name":"shell_batch","arguments":{"commands":[request]}}
-    }))?;
+    let payload = remote_payload(0, &[request])?;
     let mut records = remote_records(io, path, &payload, timer, 0, 1).await?;
     Ok(records.remove(0))
 }
