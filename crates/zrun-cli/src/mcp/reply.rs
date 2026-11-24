@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::execution::{Delivery, Disposition, EncodedResult};
+use crate::execution::{Delivery, Disposition, EncodedResult, EncodedSize};
+use crate::output::Budget;
 
 pub(super) struct Reply {
     parts: Vec<Part>,
@@ -27,14 +28,16 @@ impl Reply {
         })
     }
 
-    pub(super) fn tool(id: &Value, records: &[Delivery], batch: bool) -> serde_json::Result<Self> {
+    pub(super) async fn tool(
+        id: &Value,
+        records: &[Delivery],
+        batch: bool,
+        budget: &Arc<Budget>,
+    ) -> serde_json::Result<Self> {
         let failed = records
             .iter()
             .any(|delivery| delivery.result.exit_code != 0);
-        let records = records
-            .iter()
-            .map(|delivery| Ok((delivery.disposition, delivery.result.encode()?)))
-            .collect::<serde_json::Result<Vec<_>>>()?;
+        let records = encode_records(records, budget).await?;
         let mut reply = Self {
             parts: vec![
                 Part::Literal(br#"{"jsonrpc":"2.0","id":"#),
@@ -110,5 +113,51 @@ impl Reply {
         if batch {
             self.literal(b"]}");
         }
+    }
+}
+
+enum Encoding {
+    Shared(Arc<EncodedResult>),
+    Required(EncodedSize),
+}
+
+async fn encode_records(
+    records: &[Delivery],
+    budget: &Arc<Budget>,
+) -> serde_json::Result<Vec<(Disposition, Arc<EncodedResult>)>> {
+    let mut selected = Vec::with_capacity(records.len());
+    loop {
+        let generation = budget.generation();
+        let mut required = 0;
+        for delivery in records {
+            let encoding = if let Some(encoded) = delivery.result.prepared_encoding() {
+                Encoding::Shared(encoded)
+            } else {
+                let size = delivery.result.encoded_size()?;
+                required += size.total();
+                Encoding::Required(size)
+            };
+            selected.push(encoding);
+        }
+
+        if let Some(mut reservation) = budget.try_reserve(required) {
+            return records
+                .iter()
+                .zip(selected)
+                .map(|(delivery, encoding)| {
+                    let encoded = match encoding {
+                        Encoding::Shared(encoded) => encoded,
+                        Encoding::Required(size) => delivery
+                            .result
+                            .encode(size, reservation.split(size.total()))?,
+                    };
+                    Ok((delivery.disposition, encoded))
+                })
+                .collect();
+        }
+        // A blocked batch never retains an encoded fragment. All of its
+        // missing bytes will be reserved together on a later attempt.
+        selected.clear();
+        budget.changed(generation).await;
     }
 }

@@ -38,13 +38,13 @@ def process_sample(pid):
         return (0, 0, 0)
 
 
-def command_post(index, arguments):
+def command_post(index, arguments, tool="shell_run"):
     body = json.dumps(
         {
             "jsonrpc": "2.0",
             "id": index,
             "method": "tools/call",
-            "params": {"name": "shell_run", "arguments": arguments},
+            "params": {"name": tool, "arguments": arguments},
         },
         separators=(",", ":"),
     ).encode()
@@ -203,6 +203,82 @@ async def slow_output(path, pid, agents):
     }
 
 
+async def distinct_output(path, pid, agents, batch):
+    marker = path.with_name("finished")
+    idle_rss = process_sample(pid)[0]
+    drain = asyncio.Event()
+    connections = []
+    started = asyncio.Queue()
+    headers_ready = 0
+
+    async def client(index):
+        nonlocal headers_ready
+        first = index * batch
+        commands = [
+            {"script": f"{LARGE_SCRIPT}; printf '%s\\n' {i} >> {marker}"}
+            for i in range(first, first + batch)
+        ]
+        arguments, tool = (
+            (commands[0], "shell_run") if batch == 1 else ({"commands": commands}, "shell_batch")
+        )
+        reader, writer = await asyncio.open_unix_connection(path, limit=1024)
+        connections.append(writer)
+        writer.write(command_post(index, arguments, tool))
+        await writer.drain()
+        started.put_nowait(None)
+        length = await response_length(reader)
+        headers_ready += 1
+        await drain.wait()
+        rpc = json.loads(await reader.readexactly(length))
+        assert rpc["id"] == index and not rpc["result"]["isError"]
+        payload = rpc["result"]["structuredContent"]
+        assert json.loads(rpc["result"]["content"][0]["text"]) == payload
+        replies = [payload] if batch == 1 else payload["commands"]
+        assert len(replies) == batch
+        for reply in replies:
+            assert reply["disposition"] == "executed"
+            result = reply["result"]
+            assert result["exit_code"] == 0 and not result["truncated"]
+            assert result["stdout"] == result["stderr"] == LARGE_OUTPUT
+        return length
+
+    start = time.monotonic()
+    try:
+        async with asyncio.TaskGroup() as group:
+            calls = [group.create_task(client(index)) for index in range(agents)]
+            for _ in calls:
+                await started.get()
+            done = []
+            while len(done) < agents * batch:
+                if marker.exists():
+                    done = marker.read_text().splitlines()
+                await asyncio.sleep(0.01)
+            assert sorted(int(index) for index in done) == list(range(agents * batch))
+            await asyncio.sleep(0.1)
+            held_rss, threads, children = process_sample(pid)
+            held_headers = headers_ready
+            drain.set()
+        lengths = [call.result() for call in calls]
+    finally:
+        for writer in connections:
+            writer.close()
+        await asyncio.gather(*(writer.wait_closed() for writer in connections))
+    assert children == 0 and headers_ready == agents
+    return {
+        "mode": "distinct-output",
+        "agents": agents,
+        "batch_size": batch,
+        "commands": agents * batch,
+        "elapsed_s": time.monotonic() - start,
+        "idle_rss_kib": idle_rss,
+        "held_rss_kib": held_rss,
+        "held_threads": threads,
+        "held_children": children,
+        "headers_before_reading_bodies": held_headers,
+        "verified_response_bytes": sum(lengths),
+    }
+
+
 async def slow_input(path, pid, agents):
     directory = Path(f"/proc/{pid}/fd")
     idle_fds = len(list(directory.iterdir()))
@@ -251,7 +327,7 @@ async def slow_input(path, pid, agents):
         "held_children": children,
     }
 
-def run(binary, agents, mode, workers):
+def run(binary, agents, mode, workers, batch=1):
     with tempfile.TemporaryDirectory(prefix="zrun-load-") as directory:
         path = Path(directory) / "run.sock"
         env = {key: value for key, value in os.environ.items() if not key.startswith("ZRUN_")}
@@ -269,6 +345,8 @@ def run(binary, agents, mode, workers):
                     raise TimeoutError("zrun daemon did not announce readiness")
                 announced = process.stderr.readline()
             assert announced.strip() == f"zrun: unix:{path}".encode(), announced
+            if mode == "distinct-output":
+                return asyncio.run(asyncio.wait_for(distinct_output(path, process.pid, agents, batch), timeout=60))
             if mode in ("slow-input", "slow-output"):
                 stalled = slow_input if mode == "slow-input" else slow_output
                 return asyncio.run(asyncio.wait_for(stalled(path, process.pid, agents), timeout=60))
@@ -284,21 +362,26 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--agents", type=int, default=1_000)
     parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--commands-per-request", type=int, choices=range(1, 17), default=1)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--distinct-output-baseline", type=Path, help="compare distinct large results with this baseline daemon")
     comparisons.add_argument("--slow-input-baseline", type=Path, help="compare partial request memory with this baseline daemon")
     comparisons.add_argument("--slow-output-baseline", type=Path, help="compare cached large output with this baseline daemon")
     parser.add_argument("--workers", type=int, choices=range(1,17), default=1)
     args = parser.parse_args()
     if not 1 <= args.agents <= 2_000 or args.rounds < 1:
         parser.error("agents must be 1..2000 and rounds must be positive")
-    baseline = args.slow_input_baseline or args.slow_output_baseline
+    baseline = args.distinct_output_baseline or args.slow_input_baseline or args.slow_output_baseline
     if baseline:
-        mode = "slow-input" if args.slow_input_baseline else "slow-output"
+        if args.distinct_output_baseline:
+            mode = "distinct-output"
+        else:
+            mode = "slow-input" if args.slow_input_baseline else "slow-output"
         order = [("candidate", args.binary), ("baseline", baseline)]
         for round_number in range(args.rounds):
             binaries = order if round_number % 2 == 0 else reversed(order)
             for version, binary in binaries:
-                sample = run(binary.resolve(), args.agents, mode, args.workers)
+                sample = run(binary.resolve(), args.agents, mode, args.workers, args.commands_per_request)
                 print(json.dumps({"round": round_number + 1, "version": version,
                                   "workers": args.workers, **sample}), flush=True)
         return

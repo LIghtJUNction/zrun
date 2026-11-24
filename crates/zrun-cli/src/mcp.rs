@@ -186,7 +186,9 @@ async fn respond(
             let id = id.clone();
             drop(message);
             let records = execute_call(broker, commands).await;
-            return Reply::tool(&id, &records, batch).map(Some);
+            return Reply::tool(&id, &records, batch, broker.output_budget())
+                .await
+                .map(Some);
         }
         _ => return rpc_error(id.clone(), -32601, "method not found"),
     };

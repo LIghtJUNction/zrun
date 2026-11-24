@@ -13,6 +13,8 @@ mod executor;
 #[cfg(target_os = "linux")]
 mod mcp;
 #[cfg(target_os = "linux")]
+mod output;
+#[cfg(target_os = "linux")]
 mod plugin;
 #[cfg(target_os = "linux")]
 mod policy;

@@ -3,7 +3,7 @@ use std::future::{Future, poll_fn};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use zrun::io::Handle;
 use zrun::sync::{self, Receiver, Sender};
 
 use crate::executor::{Executor, Spawner};
+use crate::output::{Budget, Reservation};
 
 use crate::plugin::Plugin;
 use crate::policy::Gate;
@@ -29,6 +30,7 @@ const MAX_WAITERS: usize = 4_096;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 1_024;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ENCODED_OUTPUT: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -107,13 +109,50 @@ pub(crate) struct ResultRecord {
     pub truncated: bool,
     pub error: Option<String>,
     #[serde(skip)]
-    pub(crate) encoded: Mutex<Weak<EncodedResult>>,
+    pub(crate) encoding: Encoding,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Encoding {
+    prepared: Mutex<Weak<EncodedResult>>,
+    size: OnceLock<EncodedSize>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EncodedSize {
+    json: usize,
+    json_string: usize,
+}
+
+impl EncodedSize {
+    pub(crate) fn total(self) -> usize {
+        self.json + self.json_string
+    }
+}
+
+impl io::Write for EncodedSize {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.json += bytes.len();
+        // Compact JSON already escapes control characters. Quoting the whole
+        // document adds one slash to each existing slash or quotation mark.
+        self.json_string += bytes.len()
+            + bytes
+                .iter()
+                .filter(|&&byte| matches!(byte, b'\\' | b'"'))
+                .count();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct EncodedResult {
     json: Box<[u8]>,
     json_string: Box<[u8]>,
+    reservation: Reservation,
 }
 
 impl EncodedResult {
@@ -134,24 +173,64 @@ impl ResultRecord {
             stderr: Vec::new(),
             truncated: false,
             error: Some(error.to_string()),
-            encoded: Mutex::default(),
+            encoding: Encoding::default(),
         }
     }
 
-    pub(crate) fn encode(&self) -> serde_json::Result<Arc<EncodedResult>> {
-        let mut previous = self.encoded.lock().expect("result encoding poisoned");
+    pub(crate) fn prepared_encoding(&self) -> Option<Arc<EncodedResult>> {
+        self.encoding
+            .prepared
+            .lock()
+            .expect("result encoding poisoned")
+            .upgrade()
+    }
+
+    pub(crate) fn encoded_size(&self) -> serde_json::Result<EncodedSize> {
+        if let Some(size) = self.encoding.size.get() {
+            return Ok(*size);
+        }
+        let mut size = EncodedSize {
+            json: 0,
+            json_string: 2,
+        };
+        serde_json::to_writer(&mut size, self)?;
+        let _ = self.encoding.size.set(size);
+        Ok(size)
+    }
+
+    pub(crate) fn encode(
+        &self,
+        size: EncodedSize,
+        reservation: Reservation,
+    ) -> serde_json::Result<Arc<EncodedResult>> {
+        let mut previous = self
+            .encoding
+            .prepared
+            .lock()
+            .expect("result encoding poisoned");
         if let Some(encoded) = previous.upgrade() {
             return Ok(encoded);
         }
-        let json = serde_json::to_string(self)?;
-        let json_string = serde_json::to_vec(&json)?;
+        let mut json = Vec::with_capacity(size.json);
+        serde_json::to_writer(&mut json, self)?;
+        let mut json_string = Vec::with_capacity(size.json_string);
+        let text = std::str::from_utf8(&json).expect("compact JSON is UTF-8");
+        serde_json::to_writer(&mut json_string, text)?;
+        if (json.len(), json_string.len()) != (size.json, size.json_string) {
+            return Err(serde_json::Error::io(io::Error::other(
+                "encoded result size changed",
+            )));
+        }
         let encoded = Arc::new(EncodedResult {
-            json: json.into_bytes().into_boxed_slice(),
+            json: json.into_boxed_slice(),
             json_string: json_string.into_boxed_slice(),
+            reservation,
         });
         // Idle cached records retain only raw output. Concurrent sends share
         // the encoded bytes while any of them still needs the representation.
         *previous = Arc::downgrade(&encoded);
+        drop(previous);
+        encoded.reservation.published();
         Ok(encoded)
     }
 }
@@ -280,6 +359,7 @@ struct Shared {
     plugin: Option<Plugin>,
     shell: PathBuf,
     directory: PathBuf,
+    output_budget: Arc<Budget>,
     io: Handle,
     timer: Timer,
 }
@@ -308,6 +388,7 @@ impl Broker {
             plugin: Plugin::from_env()?,
             shell,
             directory: std::env::current_dir()?,
+            output_budget: Budget::new(MAX_ENCODED_OUTPUT),
             io: io.clone(),
             timer,
         });
@@ -324,6 +405,10 @@ impl Broker {
             }
         }
         Ok(Self { shared })
+    }
+
+    pub(crate) fn output_budget(&self) -> &Arc<Budget> {
+        &self.shared.output_budget
     }
 
     pub(crate) async fn submit(&self, mut request: Request) -> io::Result<Receiver<Delivery>> {
