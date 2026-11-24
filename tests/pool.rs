@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::future::pending;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use zrun::{JoinError, Pool, Runtime, SpawnError, yield_now};
@@ -88,6 +88,59 @@ fn timer_capacity_cancellation_and_shutdown() {
     assert_eq!(pool.stats().queued_tasks, 0);
     assert_eq!(pool.stats().timer_entries, 0);
     assert!(matches!(spawner.spawn(async {}), Err(SpawnError::Shutdown)));
+}
+
+#[test]
+fn concurrent_admission_uses_all_slots_and_releases_cancelled_tasks() {
+    const CAPACITY: usize = 19;
+    const PRODUCERS: usize = 8;
+    let mut pool = Pool::with_max_tasks(4, CAPACITY).expect("start bounded pool");
+    let start = Barrier::new(PRODUCERS);
+    let mut tasks = thread::scope(|scope| {
+        let producers: Vec<_> = (0..PRODUCERS)
+            .map(|_| {
+                let start = &start;
+                let spawner = pool.spawner();
+                scope.spawn(move || {
+                    start.wait();
+                    (0..CAPACITY)
+                        .filter_map(|_| match spawner.spawn(pending::<()>()) {
+                            Ok(task) => Some(task),
+                            Err(SpawnError::AtCapacity { capacity: CAPACITY }) => None,
+                            Err(error) => panic!("unexpected admission failure: {error}"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        producers
+            .into_iter()
+            .flat_map(|producer| producer.join().expect("producer finishes"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(tasks.len(), CAPACITY);
+    assert_eq!(pool.stats().active_tasks, CAPACITY);
+
+    let cancelled = tasks.pop().expect("one admitted task");
+    cancelled.abort();
+    assert_eq!(pool.block_on(cancelled), Err(JoinError::Cancelled));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match pool.spawn(pending::<()>()) {
+            Ok(replacement) => {
+                tasks.push(replacement);
+                break;
+            }
+            Err(SpawnError::AtCapacity { .. }) if Instant::now() < deadline => thread::yield_now(),
+            Err(error) => panic!("cancelled slot did not become reusable: {error}"),
+        }
+    }
+    pool.shutdown();
+    assert_eq!(pool.stats().active_tasks, 0);
+    assert_eq!(pool.stats().queued_tasks, 0);
+    for task in tasks {
+        assert_eq!(pool.block_on(task), Err(JoinError::Shutdown));
+    }
 }
 
 #[test]

@@ -217,7 +217,7 @@ impl Task {
     /// A scheduler-owned lookup hint, not the task's identity. The scheduler
     /// reads and changes it under its registry lock and checks the allocation
     /// at that index before removal or enqueue. Moving a registry entry never
-    /// moves this Task allocation or changes its monotonically assigned id.
+    /// moves this Task allocation or changes its assigned id.
     pub fn registry_index(&self) -> usize {
         self.registry_index.load(Ordering::Relaxed)
     }

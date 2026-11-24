@@ -40,17 +40,22 @@ struct Worker {
     parker: Arc<Parker>,
 }
 
-#[derive(Default)]
 struct Active {
     next_id: u64,
     tasks: Vec<TaskRef>,
+}
+
+#[repr(align(128))]
+struct RegistryShard {
+    state: Mutex<Active>,
+    capacity: usize,
 }
 
 struct SharedPool {
     closed: AtomicBool,
     route: AtomicUsize,
     limit: usize,
-    active: Mutex<Active>,
+    active: Box<[RegistryShard]>,
     workers: Box<[Worker]>,
     clock: Driver,
 }
@@ -61,26 +66,79 @@ impl SharedPool {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let (task, join) = {
-            let mut active = lock(&self.active);
+        let caller = self.local_worker();
+        let owner = caller
+            .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
+        let preferred = owner % self.active.len();
+        let (task, join) = self.admit(preferred, future)?;
+        self.publish(task, owner, caller.is_some(), Arrival::Spawn);
+        Ok(join)
+    }
+
+    fn admit<F>(
+        self: &Arc<Self>,
+        preferred: usize,
+        future: F,
+    ) -> Result<(TaskRef, JoinHandle<F::Output>), SpawnError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        // Keep the future outside the guards until admission is certain. A
+        // rejected future's destructor can reenter this pool.
+        let mut future = Some(future);
+        let (first, rest) = self.active.split_at(preferred);
+        let shards = rest.iter().chain(first);
+        for shard in shards {
+            let mut active = lock(&shard.state);
             if self.closed.load(Ordering::Acquire) {
                 return Err(SpawnError::Shutdown);
             }
-            if active.tasks.len() >= self.limit {
-                return Err(SpawnError::AtCapacity {
-                    capacity: self.limit,
-                });
+            if active.tasks.len() < shard.capacity {
+                return self.register(&mut active, &mut future);
             }
-            let id = active.next_id;
-            active.next_id = id.checked_add(1).ok_or(SpawnError::IdExhausted)?;
-            let scheduler: Arc<dyn Scheduler> = self.clone();
-            let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
-            task.set_registry_index(active.tasks.len());
-            active.tasks.push(task.clone());
-            (task, join)
+        }
+
+        // A vacancy may have moved during the first scan. Confirm a genuinely
+        // full pool under a consistent snapshot. Other paths lock one shard
+        // at a time, and concurrent snapshots lock in this same order.
+        let mut states: Vec<_> = self.active.iter().map(|shard| lock(&shard.state)).collect();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SpawnError::Shutdown);
+        }
+        let Some((active, _)) = states
+            .iter_mut()
+            .zip(self.active.iter())
+            .find(|(active, shard)| active.tasks.len() < shard.capacity)
+        else {
+            return Err(SpawnError::AtCapacity {
+                capacity: self.limit,
+            });
         };
-        self.schedule(task, Arrival::Spawn);
-        Ok(join)
+        self.register(active, &mut future)
+    }
+
+    fn register<F>(
+        self: &Arc<Self>,
+        active: &mut Active,
+        future: &mut Option<F>,
+    ) -> Result<(TaskRef, JoinHandle<F::Output>), SpawnError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let id = active.next_id;
+        // The low byte identifies the immutable registration shard, even if
+        // stealing or a remote wake later runs this task on another worker.
+        active.next_id = id
+            .checked_add(MAX_WORKERS as u64)
+            .ok_or(SpawnError::IdExhausted)?;
+        let scheduler: Arc<dyn Scheduler> = self.clone();
+        let future = future.take().expect("admission consumes the future once");
+        let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
+        task.set_registry_index(active.tasks.len());
+        active.tasks.push(task.clone());
+        Ok((task, join))
     }
 
     fn local_worker(&self) -> Option<usize> {
@@ -156,20 +214,23 @@ impl SharedPool {
     }
 
     fn close(&self) {
-        let tasks = {
-            let mut active = lock(&self.active);
-            if self.closed.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            std::mem::take(&mut active.tasks)
-        };
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // An admission already holding a shard is collected before draining
+        // it. A later admission under the same lock observes closed.
+        let tasks: Vec<_> = self
+            .active
+            .iter()
+            .map(|shard| std::mem::take(&mut lock(&shard.state).tasks))
+            .collect();
         self.clock.shutdown();
         for worker in &self.workers {
             worker.parker.notify();
         }
         // Task::shutdown leaves an in-progress poll in the worker's ownership.
         // That worker resolves the cancellation once its poll returns.
-        for task in tasks {
+        for task in tasks.into_iter().flatten() {
             task.shutdown();
         }
         for worker in &self.workers {
@@ -275,7 +336,8 @@ impl Scheduler for SharedPool {
     }
 
     fn finished(&self, task: &Task) {
-        let removed = { remove_task(&mut lock(&self.active).tasks, task) };
+        let shard = &self.active[task.id() as u8 as usize];
+        let removed = { remove_task(&mut lock(&shard.state).tasks, task) };
         drop(removed);
     }
 }
@@ -324,11 +386,21 @@ impl Pool {
         }
         let queues: Box<[_]> = (0..workers).map(|_| Worker::default()).collect();
         let clock_worker = queues[0].parker.clone();
+        let shards = workers.min(max_tasks);
+        let active = (0..shards)
+            .map(|index| RegistryShard {
+                state: Mutex::new(Active {
+                    next_id: index as u64,
+                    tasks: Vec::new(),
+                }),
+                capacity: max_tasks / shards + usize::from(index < max_tasks % shards),
+            })
+            .collect();
         let shared = Arc::new(SharedPool {
             closed: AtomicBool::new(false),
             route: AtomicUsize::new(0),
             limit: max_tasks,
-            active: Mutex::new(Active::default()),
+            active,
             workers: queues,
             clock: Driver::new(max_tasks, Arc::new(move || clock_worker.notify())),
         });
@@ -378,7 +450,12 @@ impl Pool {
     /// Observe currently admitted tasks, queued tasks and outstanding timers.
     pub fn stats(&self) -> RuntimeStats {
         RuntimeStats {
-            active_tasks: lock(&self.shared.active).tasks.len(),
+            active_tasks: self
+                .shared
+                .active
+                .iter()
+                .map(|shard| lock(&shard.state).tasks.len())
+                .sum(),
             queued_tasks: self
                 .shared
                 .workers
