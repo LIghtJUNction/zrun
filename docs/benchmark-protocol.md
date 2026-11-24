@@ -6,7 +6,7 @@ This protocol measures the current-thread runtime implemented in [zrun](../src/l
 
 The [comparator](../crates/zrun-bench/src/main.rs) uses identical Future implementations for both engines. Its generic adapters are compiled separately and do not box each task. Tokio is confined to the unpublished `zrun-bench` package; `zrun` remains the native runtime. Tokio uses `Builder::new_current_thread().enable_time()`. zrun uses `Runtime::with_max_tasks(tasks)`, including an explicit capacity of 1,000,000 for that scale. Runtime construction and JSON serialization are outside throughput timing.
 
-The worker matrix is 1, 2, 4, 8, and 16. Task scales are 1,000, 10,000, 100,000, and 1,000,000. Unrequested cells remain untested. TCP and isolated scheduler CPU overhead still require separate comparators.
+The worker matrix is 1, 2, 4, 8, and 16. Task scales are 1,000, 10,000, 100,000, and 1,000,000. Unrequested cells remain untested. TCP uses a separate comparator.
 
 Table 1. Work performed and the boundary of each measurement.
 
@@ -15,6 +15,7 @@ Table 1. Work performed and the boundary of each measurement.
 | `spawn_join` | Allocate the handle vector, spawn N tasks returning their index, then await every handle and verify its exact index. | End-to-end spawn and join throughput, including handle management. |
 | `yield` | Pre-spawn N identical Futures. Each self-wakes and returns Pending K times, then returns its index. Time `block_on` through all joins. | N × K wake operations per second. Final polls and join bookkeeping are included. `yield_ns_per_op` is a wall-time proxy, not isolated CPU scheduling overhead. |
 | `wake_latency` | Pre-spawn N Futures. First poll records time for a deterministic evenly spaced subset, self-wakes, and returns Pending. Second poll records elapsed time. Join every task. | Self-wake to next-poll latency under this workload. It does not measure an external producer wake, timer, socket readiness, or TCP latency. |
+| `external_wake_latency` | Pre-spawn N Futures. Each sends its Waker to a dedicated producer thread during its initial poll. After all registrations arrive, the producer wakes each task once. A deterministic subset records time immediately before notification and again at resumption. | Cross-thread notification-to-poll latency under a burst, including queueing and worker handoff. |
 | `pending_memory` | Record RSS after runtime creation. Spawn N Futures, confirm every one has been polled and is Pending, hold for 20 ms by default, and record live RSS. Abort and join all tasks. | Incremental resident bytes and bytes per pending task, including retained join handles, the shared counter and task Futures. It is not allocator-only task-header size. |
 | `idle` | Record process RSS, construct the runtime with the requested task cap, execute an empty root Future, and record RSS again. | Runtime-construction RSS increment. Requested task capacity is configuration, not an assertion that N tasks were allocated. |
 
@@ -71,12 +72,13 @@ Table 2. P0 ratio directions and targets inherited from the design.
 | `wake_ops_per_sec`, wakes/s | Higher | ≥ 1.20 | ≥ 2.00 |
 | `yield_cpu_ns_per_wake`, CPU ns/wake | Lower | ≤ 0.85 | ≤ 0.50 |
 | `wake_p99_ns`, ns | Lower | < 1.00 | ≤ 0.70 |
+| `external_wake_p99_ns`, ns | Lower | < 1.00 | ≤ 0.70 |
 | `pending_bytes_per_task`, bytes/task | Lower | ≤ 0.85 | ≤ 0.60 |
 | `idle_rss_delta_bytes`, bytes | Lower | ≤ 0.80 | ≤ 0.50 |
 
 On Linux, `yield_process_cpu_ns` is the difference from `CLOCK_PROCESS_CPUTIME_ID` across the timed yield workload. It counts CPU consumed by the process's threads, including both user and kernel time. Division by the verified wake count gives CPU ns/wake. At one worker, it starts after submission. At multiple workers, it includes submission because workers can already be polling. Runtime creation, the post-run registry drain, and report output are outside the CPU interval. The timed code includes the common futures and join verification. This is a workload CPU cost, distinct from wall time and function-level attribution. Unsupported platforms return null.
 
-Each process's `wake_p99_ns` is computed from its retained raw latencies. The runner verifies that value and summarizes those process P99 values; the summary's P99 is **not** a pooled P99 over all tasks and rounds. Low latency-sample counts and short runs should remain visible in any interpretation.
+For each wake-latency scenario, the per-process P99 is computed from the retained raw latencies. The runner verifies that value and summarizes those process P99 values; the summary's P99 is **not** a pooled P99 over all tasks and rounds. Low latency-sample counts and short runs should remain visible in any interpretation.
 
 `missing_or_nonpositive_measurements`, `insufficient_independent_rounds`, `requires_release_build`, `not_requested` and `unsupported` never pass. Source/CI failures also remain separate from performance. The full project gate remains `not_evaluated` because this runner does not cover TCP or full correctness and stability. The TCP runner reports throughput > 1.00 (challenge ≥ 1.20), and TCP P99 < 1.00 (challenge ≤ 0.80). The full result requires the same source candidate and Tokio baseline to satisfy every required metric and configuration, plus correctness and stability evidence. Equality does not pass a strict threshold.
 

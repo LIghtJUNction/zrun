@@ -12,7 +12,7 @@
 
 候选实现提供 `Pool` 与跨线程 `PoolSpawner`。工作线程维护各自队列，空闲者从同池队列按有限批次窃取任务。定时器由首个 worker 推进，根 Future 仍在调用线程执行。`Runtime` 保留 P0 单线程入口。候选只有在完成下方性能和生命周期门槛后才进入正式发行。
 
-继续验证队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。
+继续验证队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。 跨线程唤醒已纳入同版本验收，首次 Linux 实测的六个配置均未达到 Tokio 领先门槛。[跨线程唤醒实测](measurements/external-wake-linux-20261124.md)
 
 ## P2：TCP IO
 

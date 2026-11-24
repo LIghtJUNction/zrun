@@ -396,13 +396,16 @@ def self_test():
                 with self.assertRaises(ValueError):
                     parse_affinity(invalid)
         def test_raw_latency_validation(self):
-            sample = {"schema_version": 1, "engine": "zrun", "scenario": "wake_latency", "tasks": 2,
-                      "workers": 1, "status": "ok", "correctness": True, "active_tasks": 0,
-                      "completed_tasks": 2, "checksum": 1, "config": {"yields": 16, "latency_samples": 10, "hold_ms": 20},
-                      "build": {"profile": "release"}, "latency_samples_ns": [100, 200], "metrics": {"wake_p99_ns": 199.0}}
-            self.assertIsNone(validate_sample(sample, "zrun", "wake_latency", 2, 1, 16, 10, 20))
-            sample["metrics"]["wake_p99_ns"] = 10
-            self.assertIsNotNone(validate_sample(sample, "zrun", "wake_latency", 2, 1, 16, 10, 20))
+            for scenario, metric in (("wake_latency", "wake_p99_ns"),
+                                     ("external_wake_latency", "external_wake_p99_ns")):
+                sample = {"schema_version": 1, "engine": "zrun", "scenario": scenario, "tasks": 2,
+                          "workers": 1, "status": "ok", "correctness": True, "active_tasks": 0,
+                          "completed_tasks": 2, "checksum": 1, "config": {"yields": 16, "latency_samples": 10, "hold_ms": 20},
+                          "build": {"profile": "release"}, "latency_samples_ns": [100, 200], "metrics": {metric: 199.0}}
+                args = ("zrun", scenario, 2, 1, 16, 10, 20)
+                self.assertIsNone(validate_sample(sample, *args))
+                sample["metrics"][metric] = 10
+                self.assertIsNotNone(validate_sample(sample, *args))
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(StatisticsTests))
     return 0 if result.wasSuccessful() else 1
 
