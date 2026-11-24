@@ -122,8 +122,19 @@ impl Gate {
                 })
             })
             .transpose()?;
-        let args = [program, "-c", &request.script];
-        let input = zguard::Request::command(&call_id, TOOL, &args, cwd);
+        let base = [program, "-c", request.script.as_ref()];
+        let extended;
+        let args = if request.args.is_empty() {
+            &base[..]
+        } else {
+            extended = base
+                .into_iter()
+                .chain(std::iter::once("zrun"))
+                .chain(request.args.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            &extended[..]
+        };
+        let input = zguard::Request::command(&call_id, TOOL, args, cwd);
         let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let decision = self.guard.authorize(input, now, None, &mut zguard::NoAudit);
         if !decision.is_allowed() {

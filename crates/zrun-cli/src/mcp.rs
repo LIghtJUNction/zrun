@@ -220,6 +220,7 @@ fn request_schema() -> Value {
         "properties": {
             "script": {"type":"string", "maxLength": 65536},
             "cwd": {"type":"string"},
+            "args": {"type":"array", "maxItems":128, "items":{"type":"string"}},
             "timeout_ms": {"type":"integer", "minimum":1, "maximum":3600000, "default":60000},
             "reuse": {
                 "type":"object", "additionalProperties": false,

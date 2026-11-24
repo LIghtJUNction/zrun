@@ -633,3 +633,30 @@ fn an_executable_native_script_runs_through_its_shebang() {
     assert_eq!(output.status.code(), Some(37));
     assert_eq!(output.stdout, b"native");
 }
+
+#[test]
+fn native_positional_arguments_reach_the_broker_and_distinguish_cache_entries() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let path = directory.0.join("args.zrun");
+    fs::write(
+        &path,
+        r#"# zrun:1
+async job {"script":"printf x >> count; printf '<%s>' \"$1\"","reuse":{"scope":"args","input_revision":"v1","ttl_ms":10000}}
+await *
+"#,
+    ).unwrap();
+    for arg in ["one two", "other' *", "one two"] {
+        let output = zrun()
+            .current_dir(&directory.0)
+            .env("ZRUN_SOCKET", &socket)
+            .args([path.as_os_str(), arg.as_ref()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(output.stdout, format!("<{arg}>").as_bytes());
+    }
+    assert_eq!(fs::read(directory.0.join("count")).unwrap(), b"xx");
+}

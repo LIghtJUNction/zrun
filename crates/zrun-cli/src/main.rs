@@ -68,9 +68,12 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         // Read the Linux shebang window plus enough bytes for the native header.
         (&mut file).take(256 + 10).read_to_end(&mut prefix)?;
         if script::has_native_header(&prefix) {
-            if args.next().is_some() {
-                return Err("native .zrun programs do not take positional arguments".into());
-            }
+            let positional = args
+                .map(|arg| {
+                    arg.into_string()
+                        .map_err(|_| "native .zrun arguments must be UTF-8")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             file.rewind()?;
             let mut source = String::new();
             file.take(execution::Batch::MAX_INPUT as u64 + 1)
@@ -78,7 +81,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             if source.len() > execution::Batch::MAX_INPUT {
                 return Err("native .zrun program exceeds the byte limit".into());
             }
-            return Ok(script::run(shell, &source)?);
+            return Ok(script::run(shell, &source, positional)?);
         }
     }
     match first.as_deref().and_then(OsStr::to_str) {

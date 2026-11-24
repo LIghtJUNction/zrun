@@ -46,6 +46,8 @@ pub(crate) struct Reuse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     pub script: Arc<str>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Arc<Vec<String>>,
     pub cwd: Option<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
@@ -56,6 +58,7 @@ impl Request {
     pub(crate) fn new(script: String) -> Self {
         Self {
             script: script.into(),
+            args: Arc::default(),
             cwd: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             reuse: None,
@@ -65,6 +68,12 @@ impl Request {
     pub(crate) fn validate(&self) -> io::Result<()> {
         if self.script.len() > MAX_SCRIPT || self.script.as_bytes().contains(&0) {
             return Err(invalid("invalid script length or bytes"));
+        }
+        if self.args.len() > 128
+            || self.args.iter().any(|arg| arg.as_bytes().contains(&0))
+            || self.args.iter().map(String::len).sum::<usize>() > 8192
+        {
+            return Err(invalid("invalid positional arguments"));
         }
         if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
             return Err(invalid("timeout_ms must be between 1 and 3600000"));
@@ -84,6 +93,7 @@ impl Request {
     fn size(&self) -> usize {
         self.script
             .len()
+            .saturating_add(self.args.iter().map(|arg| arg.len() + 1).sum::<usize>())
             .saturating_add(self.cwd.as_ref().map_or(0, |p| p.as_os_str().len()))
             .saturating_add(
                 self.reuse
@@ -286,6 +296,7 @@ impl Future for Ticket {
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct Key {
     script: Arc<str>,
+    args: Arc<Vec<String>>,
     cwd: PathBuf,
     timeout_ms: u64,
     reuse: Reuse,
@@ -530,6 +541,7 @@ impl Submission {
         let key = request.reuse.as_ref().map(|reuse| {
             Arc::new(Key {
                 script: request.script.clone(),
+                args: request.args.clone(),
                 cwd: request
                     .cwd
                     .clone()

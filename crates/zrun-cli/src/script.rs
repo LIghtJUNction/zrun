@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::execution::{Batch, Delivery, Request, Ticket};
 
@@ -30,7 +31,7 @@ pub(crate) fn has_native_header(source: &[u8]) -> bool {
     })
 }
 
-fn parse(source: &str) -> io::Result<Vec<Step>> {
+fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>> {
     let mut lines = source.lines().enumerate();
     let first = lines.next();
     let header = if first.is_some_and(|(_, line)| line.starts_with("#!")) {
@@ -94,7 +95,7 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
                 } else {
                     (None, rest)
                 };
-                let request = if let Some(tag) = payload.strip_prefix("<<") {
+                let mut request = if let Some(tag) = payload.strip_prefix("<<") {
                     if tag.is_empty()
                         || !tag.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                     {
@@ -116,6 +117,9 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
                     serde_json::from_str::<Request>(payload)
                         .map_err(|error| fail(&error.to_string()))?
                 };
+                if request.args.is_empty() {
+                    request.args = args.clone();
+                }
                 request
                     .validate()
                     .map_err(|error| fail(&error.to_string()))?;
@@ -149,8 +153,8 @@ fn emit(delivery: Delivery) -> io::Result<u8> {
     Ok(crate::exit_code(result.exit_code))
 }
 
-pub(crate) fn run(shell: PathBuf, source: &str) -> io::Result<u8> {
-    let steps = parse(source)?;
+pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result<u8> {
+    let steps = parse_with_args(source, Arc::new(args))?;
     if let Some(path) = std::env::var_os("ZRUN_SOCKET") {
         let path = std::sync::Arc::new(PathBuf::from(path));
         let cwd = std::env::current_dir()?;
@@ -217,6 +221,10 @@ async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(source: &str) -> io::Result<Vec<Step>> {
+        parse_with_args(source, Arc::default())
+    }
 
     #[test]
     fn validates_named_await_and_keeps_shell_block_syntax() {

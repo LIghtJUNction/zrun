@@ -34,6 +34,9 @@ pub(crate) async fn execute(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if !request.args.is_empty() {
+        command.arg("zrun").args(request.args.iter());
+    }
     if let Some(cwd) = request.cwd {
         command.current_dir(cwd);
     }

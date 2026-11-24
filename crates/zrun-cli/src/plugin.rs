@@ -84,6 +84,12 @@ impl Plugin {
     }
 
     pub(crate) async fn authorize(&self, shell: &Path, request: &Request) -> io::Result<()> {
+        if !request.args.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the configured admission plugin cannot inspect positional arguments",
+            ));
+        }
         let (reply, response) = sync::channel();
         let check = Check {
             shell: shell.to_path_buf(),
