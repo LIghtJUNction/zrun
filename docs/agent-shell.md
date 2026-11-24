@@ -95,3 +95,6 @@ python3 scripts/agent-load.py --binary target/release/zrun --agents 1000 --round
 [不同命令输出的出站背压实测](measurements/mcp-egress-linux-20261124.md)
 
 [批量命令的原始结果预算实测](measurements/mcp-capture-linux-20261124.md)
+
+
+Unix socket 的 HTTP/1.1 客户端可以发送 `Connection: keep-alive`，并在读完当前响应后在同一连接发送下一条请求。使用 `Content-Length` 定界，请求不可流水线发送。每条请求重新检查 Host、协议版本和授权，每条连接最多 64 次请求。响应头返回 `Connection: close` 时应重新连接；连接中断后，只有在确定请求可以安全重复时才应重试。

@@ -21,3 +21,8 @@
 Linux p0.4 发行二进制与 zmcpio 0.5.3（`9c1d8df`）在默认 `$XDG_RUNTIME_DIR/zrun/mcp.sock` 完成 MCP 2025-11-25 初始化、工具发现和 `shell_run` 调用。通过 JSON `args` 传入含空格和星号的参数，shell 按字面值返回。测试同时校验目录 `0700`、socket `0600` 以及正常退出清理。
 
 以 zmem 0.4.5 启动 `zrun --zmem interactive mcp --unix PATH`，另一个 zrun 进程通过 socket 提交命令。用 `/proc` 核对 broker 和受管命令位于同一个 `zmem-interactive-*.scope`，服务正常退出并清理 socket。
+
+
+## Unix socket 顺序连接复用
+
+候选 release 服务在 CPU 0–15、4 worker 下对比同一客户端逐请求连接和按 64 条一组复用连接。单轮 640 个顺序 MCP 调用，所有输出逐项校验，同键命令仅执行一次。20 对独立服务进程，先后顺序平衡后固定随机。连接数从 640 降到 10，中位耗时从 26.18 ms 到 20.09 ms，比值 0.767 [0.690, 0.838]。结果限于该顺序复用负载。原始数据位于 `dist/zrun-mcp-keepalive-load.tsv`。

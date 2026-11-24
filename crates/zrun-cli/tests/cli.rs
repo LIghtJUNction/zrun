@@ -688,3 +688,72 @@ fn login_shell_uses_the_configured_backend_and_env_can_override_it() {
     assert!(overridden.status.success());
     assert_eq!(overridden.stdout, b"explicit");
 }
+
+#[test]
+fn unix_mcp_connection_can_reuse_the_stream_for_sequential_requests() {
+    let dir = Directory::new();
+    let sock = dir.0.join("mcp.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&sock));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+
+    let connection = UnixStream::connect(sock).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(connection);
+    for (id, host, expected, keep_open) in [
+        (1, "zrun", 200, true),
+        (2, "zrun", 200, true),
+        (3, "other", 403, false),
+    ] {
+        let body = serde_json::to_vec(&rpc(id, "tools/list", json!({}))).unwrap();
+        let stream = reader.get_mut();
+        write!(
+            stream,
+            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        ).unwrap();
+        stream.write_all(&body).unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(
+            line.split_ascii_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u16>()
+                .unwrap(),
+            expected
+        );
+        let mut length = None;
+        let mut connection = None;
+        loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+            if let Some(value) = line.strip_prefix("Connection: ") {
+                connection = Some(value.trim().to_string());
+            }
+        }
+        assert_eq!(
+            connection.as_deref(),
+            Some(if keep_open { "keep-alive" } else { "close" })
+        );
+        let mut response = vec![0; length.unwrap()];
+        reader.read_exact(&mut response).unwrap();
+        if keep_open {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&response).unwrap()["id"],
+                id
+            );
+        }
+    }
+    let mut remainder = Vec::new();
+    reader.read_to_end(&mut remainder).unwrap();
+    assert!(remainder.is_empty());
+}

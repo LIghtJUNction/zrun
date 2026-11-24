@@ -15,6 +15,7 @@ use crate::execution::Broker;
 use crate::executor::{Executor, Spawner};
 
 const MAX_CONNECTIONS: usize = 2_048;
+const MAX_REQUESTS_PER_CONNECTION: usize = 64;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_REQUEST_BUFFER: usize = MAX_MESSAGE + MAX_HEADERS;
 const MAX_BUFFERED_REQUESTS: usize = 32 * 1024 * 1024;
@@ -261,37 +262,42 @@ async fn handle(
     timer: &Timer,
     ingress: &AtomicUsize,
 ) -> io::Result<()> {
-    let request = deadline(
-        read_request(stream, access, ingress),
-        timer,
-        CLIENT_IO_TIMEOUT,
-    )
-    .await?;
-    let rejected = matches!(&request, Err(ReadError::Http(_)));
-    let (status, body) = match request {
-        Err(ReadError::Io(error)) => return Err(error),
-        Err(ReadError::Http(status)) => (status, None),
-        Ok(frame) => {
-            let Frame { bytes, charge } = frame;
-            let message = serde_json::from_slice(&bytes);
-            drop(bytes);
-            match respond(broker, message, charge).await? {
-                Some(reply) => (Status::Ok, Some(reply)),
-                None => (Status::Accepted, None),
+    for index in 0..MAX_REQUESTS_PER_CONNECTION {
+        let request = deadline(
+            read_request(stream, access, ingress),
+            timer,
+            CLIENT_IO_TIMEOUT,
+        )
+        .await?;
+        let rejected = matches!(&request, Err(ReadError::Http(_)));
+        let (status, body, keep_alive) = match request {
+            Err(ReadError::Io(error)) => return Err(error),
+            Err(ReadError::Http(status)) => (status, None, false),
+            Ok((Frame { bytes, charge }, keep_alive)) => {
+                let message = serde_json::from_slice(&bytes);
+                drop(bytes);
+                match respond(broker, message, charge).await? {
+                    Some(reply) => (Status::Ok, Some(reply), keep_alive),
+                    None => (Status::Accepted, None, keep_alive),
+                }
             }
+        };
+        let keep_alive = keep_alive && index + 1 < MAX_REQUESTS_PER_CONNECTION;
+        deadline(
+            write_reply(stream, status, body.as_ref(), keep_alive),
+            timer,
+            CLIENT_IO_TIMEOUT,
+        )
+        .await??;
+        if rejected {
+            // Send FIN first so unread request bytes do not hide the response.
+            stream.shutdown_write()?;
+            let _ = deadline(drain_rejected(stream), timer, Duration::from_millis(250)).await;
         }
-    };
-    deadline(
-        write_reply(stream, status, body.as_ref()),
-        timer,
-        CLIENT_IO_TIMEOUT,
-    )
-    .await??;
-    if rejected {
-        // Send FIN first. Closing a socket with unread request bytes could send
-        // RST and hide an authentication or framing response from the caller.
-        stream.shutdown_write()?;
-        let _ = deadline(drain_rejected(stream), timer, Duration::from_millis(250)).await;
+        if !keep_alive {
+            break;
+        }
+        zrun::yield_now().await;
     }
     Ok(())
 }
@@ -428,14 +434,14 @@ async fn read_request<'a>(
     stream: &mut Stream,
     access: &Access,
     ingress: &'a AtomicUsize,
-) -> Result<Frame<'a>, ReadError> {
+) -> Result<(Frame<'a>, bool), ReadError> {
     let mut frame = Frame::new(Some(ingress));
     let first_body = read_headers(stream, &mut frame).await?;
-    let framing = parse_headers(&frame.bytes[..first_body], access)?;
+    let (framing, keep_alive) = parse_headers(&frame.bytes[..first_body], access)?;
     frame.discard_prefix(first_body);
     match framing {
         Framing::Length(length) => {
-            // A connection carries one request. Refuse extra bytes already received.
+            // Requests must be sent sequentially; reject already-buffered extra bytes.
             if frame.bytes.len() > length {
                 return Err(Status::BadRequest.into());
             }
@@ -448,7 +454,7 @@ async fn read_request<'a>(
         }
         Framing::Chunked => read_chunked(stream, &mut frame).await?,
     }
-    Ok(frame)
+    Ok((frame, keep_alive))
 }
 
 enum Framing {
@@ -523,7 +529,7 @@ async fn more_chunk_bytes(stream: &mut Stream, frame: &mut Frame<'_>) -> Result<
     Ok(())
 }
 
-fn parse_headers(bytes: &[u8], access: &Access) -> Result<Framing, Status> {
+fn parse_headers(bytes: &[u8], access: &Access) -> Result<(Framing, bool), Status> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut request = httparse::Request::new(&mut headers);
     if !matches!(request.parse(bytes), Ok(httparse::Status::Complete(_))) {
@@ -574,11 +580,14 @@ fn parse_headers(bytes: &[u8], access: &Access) -> Result<Framing, Status> {
     {
         return Err(Status::UnsupportedMedia);
     }
+    let keep_alive = access.authorization.is_none()
+        && request.version == Some(1)
+        && get("Connection")?.is_some_and(|value| value.eq_ignore_ascii_case("keep-alive"));
     let transfer = get("Transfer-Encoding")?;
     let length_header = get("Content-Length")?;
     if let Some(transfer) = transfer {
         if length_header.is_none() && transfer.eq_ignore_ascii_case("chunked") {
-            return Ok(Framing::Chunked);
+            return Ok((Framing::Chunked, false));
         }
         return Err(Status::BadRequest);
     }
@@ -588,7 +597,7 @@ fn parse_headers(bytes: &[u8], access: &Access) -> Result<Framing, Status> {
     if length > MAX_MESSAGE {
         return Err(Status::TooLarge);
     }
-    Ok(Framing::Length(length))
+    Ok((Framing::Length(length), keep_alive))
 }
 
 fn same_secret(left: &[u8], right: &[u8]) -> bool {
@@ -600,9 +609,15 @@ fn same_secret(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-async fn write_reply(stream: &mut Stream, status: Status, body: Option<&Reply>) -> io::Result<()> {
+async fn write_reply(
+    stream: &mut Stream,
+    status: Status,
+    body: Option<&Reply>,
+    keep_alive: bool,
+) -> io::Result<()> {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
     let header = format!(
-        "HTTP/1.1 {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n",
+        "HTTP/1.1 {}\r\nConnection: {connection}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n",
         status.line(),
         body.map_or(0, Reply::len),
         status.extra(),
