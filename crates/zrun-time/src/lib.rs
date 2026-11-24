@@ -317,6 +317,15 @@ impl Timer {
         let Some(inner) = self.inner.upgrade() else {
             return Sleep::ready(Err(TimerError::Closed));
         };
+        // Prepare both references before locking so allocation cannot stall
+        // other registrations. Rejected allocations are dropped off-lock.
+        let mut prepared = match deadline {
+            Deadline::At(_) => {
+                let waiter = Arc::new(Waiter::pending());
+                Some((waiter.clone(), waiter))
+            }
+            Deadline::Immediate | Deadline::Overflow => None,
+        };
         let admitted = {
             let mut state = lock(&inner.state);
             if state.closed {
@@ -331,12 +340,12 @@ impl Timer {
                 } else if let Some(next_id) = state.next_id.checked_add(1) {
                     let key = (deadline, state.next_id);
                     state.next_id = next_id;
-                    let waiter = Arc::new(Waiter::pending());
                     let changed = state
                         .entries
                         .first_key_value()
                         .is_none_or(|(first, _)| key < *first);
-                    state.entries.insert(key, waiter.clone());
+                    let (entry, waiter) = prepared.take().expect("future timer has a waiter");
+                    state.entries.insert(key, entry);
                     Ok((key, waiter, changed))
                 } else {
                     Err(TimerError::IdExhausted)
