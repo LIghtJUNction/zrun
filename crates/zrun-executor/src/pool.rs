@@ -180,11 +180,10 @@ impl SharedPool {
 
     fn steal(&self, own: usize) -> Option<TaskRef> {
         let mut batch = std::array::from_fn::<_, STEAL_LIMIT, _>(|_| None);
-        let len = self.workers.len();
-        for offset in 1..len {
-            let peer = (own + offset) % len;
+        let (before, own_and_after) = self.workers.split_at(own);
+        for peer in own_and_after[1..].iter().chain(before) {
             let first = {
-                let mut victim = match self.workers[peer].ready.try_lock() {
+                let mut victim = match peer.ready.try_lock() {
                     Ok(victim) => victim,
                     Err(TryLockError::WouldBlock) => continue,
                     Err(TryLockError::Poisoned(error)) => error.into_inner(),
