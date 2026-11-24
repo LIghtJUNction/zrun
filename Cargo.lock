@@ -564,9 +564,6 @@ version = "0.1.0-p0.2"
 [[package]]
 name = "zrun-task"
 version = "0.1.0-p0.2"
-dependencies = [
- "zrun-sync",
-]
 
 [[package]]
 name = "zrun-time"

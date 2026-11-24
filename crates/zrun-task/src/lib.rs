@@ -17,8 +17,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use zrun_sync::{Receiver, Sender, channel};
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
@@ -57,7 +55,7 @@ impl std::error::Error for JoinError {}
 
 /// Await a task's single result. Dropping this handle detaches the wait.
 pub struct JoinHandle<T> {
-    receiver: Receiver<Result<T, JoinError>>,
+    result: Arc<JoinCell<T>>,
     task: Weak<Task>,
 }
 
@@ -73,22 +71,56 @@ impl<T> JoinHandle<T> {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.receiver.is_ready()
+        matches!(
+            *lock(&self.result.state),
+            JoinState::Ready(_) | JoinState::Taken
+        )
     }
 }
 
-// The result is in the separately allocated channel; no pinned T is exposed.
+// The result sits behind an Arc and a mutex. Pinning a handle never pins T.
 impl<T> Unpin for JoinHandle<T> {}
 
 impl<T> Future for JoinHandle<T> {
     type Output = Result<T, JoinError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.get_mut().receiver).poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(JoinError::Shutdown)),
-            Poll::Pending => Poll::Pending,
-        }
+        // Waker cloning and drops may call user code.
+        let incoming = cx.waker().clone();
+        let old = {
+            let mut state = lock(&self.result.state);
+            match &mut *state {
+                JoinState::Ready(_) => {
+                    let JoinState::Ready(result) = std::mem::replace(&mut *state, JoinState::Taken)
+                    else {
+                        unreachable!("matched a ready join result");
+                    };
+                    return Poll::Ready(result);
+                }
+                JoinState::Waiting(waker) => {
+                    if waker.as_ref().is_some_and(|old| old.will_wake(&incoming)) {
+                        None
+                    } else {
+                        waker.replace(incoming)
+                    }
+                }
+                JoinState::Taken | JoinState::Detached => {
+                    panic!("join handle polled after completion")
+                }
+            }
+        };
+        drop(old);
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for JoinHandle<T> {
+    fn drop(&mut self) {
+        let discarded = {
+            let mut state = lock(&self.result.state);
+            std::mem::replace(&mut *state, JoinState::Detached)
+        };
+        drop(discarded);
     }
 }
 
@@ -96,21 +128,39 @@ trait Completion: Send + Sync {
     fn fail(&self, error: JoinError);
 }
 
-struct CompletionCell<T> {
-    sender: Mutex<Option<Sender<Result<T, JoinError>>>>,
+enum JoinState<T> {
+    Waiting(Option<Waker>),
+    Ready(Result<T, JoinError>),
+    Taken,
+    Detached,
 }
 
-impl<T> CompletionCell<T> {
+struct JoinCell<T> {
+    state: Mutex<JoinState<T>>,
+}
+
+impl<T> JoinCell<T> {
     fn finish(&self, value: Result<T, JoinError>) {
-        let sender = { lock(&self.sender).take() };
-        if let Some(sender) = sender {
-            // A detached receiver returns the value to us for one off-lock drop.
-            let _ = sender.send(value);
+        let mut value = Some(value);
+        let waker = {
+            let mut state = lock(&self.state);
+            if let JoinState::Waiting(slot) = &mut *state {
+                let waiter = slot.take();
+                *state = JoinState::Ready(value.take().expect("completion has one result"));
+                waiter
+            } else {
+                None
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
+        // Detached result values may execute user destructors.
+        drop(value);
     }
 }
 
-impl<T: Send + 'static> Completion for CompletionCell<T> {
+impl<T: Send + 'static> Completion for JoinCell<T> {
     fn fail(&self, error: JoinError) {
         self.finish(Err(error));
     }
@@ -265,9 +315,8 @@ impl Task {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let (sender, receiver) = channel();
-        let completion = Arc::new(CompletionCell {
-            sender: Mutex::new(Some(sender)),
+        let completion = Arc::new(JoinCell {
+            state: Mutex::new(JoinState::Waiting(None)),
         });
         let success = completion.clone();
         let wrapped = async move {
@@ -282,10 +331,10 @@ impl Task {
                 future: Some(Box::pin(wrapped)),
             }),
             scheduler,
-            completion,
+            completion: completion.clone(),
         });
         let handle = JoinHandle {
-            receiver,
+            result: completion,
             task: Arc::downgrade(&task),
         };
         (task, handle)
@@ -481,6 +530,22 @@ fn drop_future(future: TaskFuture) -> Result<(), Box<dyn Any + Send>> {
 // further count for its returned RawWaker; wake_by_ref does not consume one.
 const TASK_WAKER_VTABLE: RawWakerVTable =
     RawWakerVTable::new(raw_clone, raw_wake, raw_wake_by_ref, raw_drop);
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Executors explicitly resolve registered tasks. This path also closes
+        // a task whose initial runnable was dropped before registration.
+        if state.schedule.phase != Phase::Complete {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                self.completion.fail(JoinError::Shutdown)
+            }));
+        }
+    }
+}
 
 fn task_waker(task: Arc<Task>) -> Waker {
     let raw = RawWaker::new(Arc::into_raw(task).cast(), &TASK_WAKER_VTABLE);
@@ -746,6 +811,19 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(scheduler.finished.load(Ordering::SeqCst), 1);
         drop(lock(&saved).take());
+    }
+
+    #[test]
+    fn dropping_an_unregistered_task_completes_its_join() {
+        let scheduler: Arc<dyn Scheduler> = Arc::new(TestScheduler::default());
+        let (task, mut join) =
+            Task::new(1, std::future::pending::<()>(), Arc::downgrade(&scheduler));
+        assert!(poll_join(&mut join).is_pending());
+        drop(task);
+        assert!(matches!(
+            poll_join(&mut join),
+            Poll::Ready(Err(JoinError::Shutdown))
+        ));
     }
 
     #[test]
