@@ -11,12 +11,10 @@ name = "zrun"
 path = "src/main.rs"
 doc = false
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 zrun = { path = "../..", features = ["process"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
 httparse = "1.10"
 signal-hook = "0.3"
 z64 = { git = "https://github.com/LIghtJUNction/z64.git" }

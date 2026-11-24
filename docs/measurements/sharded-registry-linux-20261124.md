@@ -8,9 +8,7 @@
 
 关闭先停止接收新任务，再逐分片分离登记表。已经持有分片锁的提交由关闭线程收集。后续提交在同一分片锁内读到关闭标记。所有登记引用分离后，先停止定时器与唤醒 worker，再终止未完成任务。正在 poll 的任务继续遵守原任务状态机。
 
-旧版 4 worker、百万任务的创建与回收采样中，回收登记及其子调用占 17.52% 的 CPU 样本，就绪任务选取和系统调用各约三成。本轮单独验证登记分片。单次 profile 用于定位，吞吐和开销以重复进程对照为准。
-
-分片后在同类 4 worker 创建与回收负载复采样，登记回收及子调用约占 3.7%，就绪任务选取约占 40%，系统调用约占 29%。自唤醒负载中，队列发布与选取合计约占 50% 的排他 CPU 样本。两次采样用于确定后续优化位置。
+4 worker、百万任务的创建与回收采样中，登记回收及子调用的占比从基线的 14.4% 降到候选的 3.7%。候选的就绪任务选取约占 40%，系统调用约占 29%。自唤醒负载中，队列发布与选取合计约占 50% 的排他 CPU 样本。采样用于定位，吞吐和开销以重复进程对照为准。
 
 ## 相对上一版
 
@@ -52,7 +50,9 @@
 
 单 worker 与 8 worker 的百万任务通过。8 worker 30 秒测试完成 12,250,000 项，活跃任务清零。4 worker 的 24 小时长测已启动，等候完整时长和 RSS 判定。完整任务规模矩阵与跨平台验收仍在进行。
 
-官方 MCP SDK 通过 stdio 转发、TCP 和 Unix socket。zmcpio 0.5.3 从默认 Unix socket 完成初始化、工具发现和实际调用。8 worker 的千并发 Unix 复用测量记录一次实际执行和 999 次请求合并。真实 PTY、zmem scope、zplugin 和 zguard 的规则执行均通过。核心及 CLI 的常规依赖图无 Tokio。
+官方 MCP SDK 通过 stdio 转发、TCP 和 Unix socket。zmcpio 0.5.3 从默认 Unix socket 完成初始化、工具发现和实际调用。8 worker 的千并发 Unix 复用测量记录一次实际执行和 999 次请求合并。真实 PTY、zmem scope、zplugin 和 zguard 的规则执行均通过。核心及 CLI 的常规依赖图无 Tokio。独立 stdio 支持首次执行、缓存命中及批量调用。
+
+Windows x86_64 GNU 目标的全工作区、全 feature、全 target 交叉编译检查通过。Windows 本机执行与性能矩阵待验收。CLI 按平台限定依赖后，Linux release 二进制逐字节一致。
 
 原始数据位于 Project Z 的 `dist`。
 
@@ -62,5 +62,5 @@
 - `zrun-registry-tcp-{paired,tokio}/report.json`
 - `zrun-registry-{validation,shutdown-validation}.log`、`zrun-registry-agent-load.json` 与 `zrun-registry-million-w8.json`
 - `zrun-registry-soak-w8/report.json` 与 `zrun-soak-24h-managed-e9726e2-w4/report.json`
-
-- `zrun-registry-w4-{spawn_join,yield}.er` 与对应 profile 文本
+- `zrun-registry-{base-,}w4-{spawn_join,yield}.er` 与对应 profile 文本
+- `zrun-registry-platform-validation.log` 与 `zrun-registry-stdio-direct.log`
