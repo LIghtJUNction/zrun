@@ -1,8 +1,10 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal};
+#[cfg(unix)]
+use std::io::Read;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::Write;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
@@ -36,7 +38,7 @@ const HELP: &str = "Usage:
   zrun --help
   zrun --version
 
-ZRUN_SHELL selects the shell executable, followed by SHELL on Unix.
+ZRUN_SHELL overrides the Unix zrun/shell configuration file and SHELL.
 ZRUN_WORKERS selects the worker count for the managed runtime.
 --unix without PATH uses $XDG_RUNTIME_DIR/zrun/mcp.sock.";
 
@@ -56,7 +58,6 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     #[cfg(not(unix))]
     drop(invoked);
     let mut args = argv;
-    let shell = shell();
     let first = args.next();
     #[cfg(target_os = "linux")]
     if let Some(path) = first.as_ref().map(std::path::Path::new)
@@ -81,7 +82,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             if source.len() > execution::Batch::MAX_INPUT {
                 return Err("native .zrun program exceeds the byte limit".into());
             }
-            return Ok(script::run(shell, &source, positional)?);
+            return Ok(script::run(shell()?, &source, positional)?);
         }
     }
     match first.as_deref().and_then(OsStr::to_str) {
@@ -117,7 +118,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
         Some("mcp") => {
             #[cfg(target_os = "linux")]
-            mcp::serve(shell, args)?;
+            mcp::serve(shell()?, args)?;
             #[cfg(not(target_os = "linux"))]
             return Err("the MCP server currently requires Linux".into());
             #[cfg(target_os = "linux")]
@@ -129,7 +130,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 return Err("pass the full script as one argument".into());
             }
             managed(
-                shell,
+                shell()?,
                 Some(script.into_string().map_err(|_| "script is not UTF-8")?),
             )
         }
@@ -137,11 +138,11 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err("zrun batch takes commands from stdin".into());
             }
-            managed(shell, None)
+            managed(shell()?, None)
         }
         _ => {
             let interactive = first.is_none() && io::stdin().is_terminal();
-            let mut command = Command::new(shell);
+            let mut command = Command::new(shell()?);
             #[cfg(unix)]
             if invoked
                 .as_ref()
@@ -160,7 +161,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     }
 }
 
-fn shell() -> PathBuf {
+fn shell() -> io::Result<PathBuf> {
     let explicit = env::var_os("ZRUN_SHELL").filter(|value| !value.is_empty());
     #[cfg(unix)]
     let fallback = || {
@@ -174,7 +175,13 @@ fn shell() -> PathBuf {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| OsString::from("cmd.exe"))
     };
-    let selected = PathBuf::from(explicit.unwrap_or_else(fallback));
+    let explicit = explicit.map(PathBuf::from);
+    #[cfg(unix)]
+    let explicit = match explicit {
+        Some(path) => Some(path),
+        None => configured_shell()?,
+    };
+    let selected = explicit.unwrap_or_else(|| PathBuf::from(fallback()));
     #[cfg(unix)]
     let recursive = selects_self(&selected);
     #[cfg(not(unix))]
@@ -186,11 +193,58 @@ fn shell() -> PathBuf {
         });
     if recursive {
         #[cfg(unix)]
-        return "/bin/sh".into();
+        return Ok("/bin/sh".into());
         #[cfg(windows)]
-        return "cmd.exe".into();
+        return Ok("cmd.exe".into());
     }
-    selected
+    Ok(selected)
+}
+
+#[cfg(unix)]
+fn configured_shell() -> io::Result<Option<PathBuf>> {
+    let directory = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".config"))
+        });
+    let Some(path) = directory.map(|directory| directory.join("zrun/shell")) else {
+        return Ok(None);
+    };
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} must contain one absolute shell path", path.display()),
+        )
+    };
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    const MAX_CONFIG_BYTES: u64 = 4096;
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
+        return Err(invalid());
+    }
+    let mut text = String::new();
+    std::fs::File::open(&path)?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_string(&mut text)?;
+    let value = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
+    let shell = PathBuf::from(value);
+    if text.len() as u64 > MAX_CONFIG_BYTES
+        || !shell.is_absolute()
+        || value.contains(['\0', '\r', '\n'])
+    {
+        return Err(invalid());
+    }
+    Ok(Some(shell))
 }
 
 #[cfg(unix)]

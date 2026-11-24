@@ -2,7 +2,7 @@
 
 普通 `.zrun` 文件使用配置的 shell。参见[原生异步 .zrun 脚本](native-script.md)。
 
-直接执行 `zrun` 会进入 `ZRUN_SHELL` 或 `SHELL` 指定的交互 shell。普通 shell 参数也可以直接传入，例如 `zrun -c 'cd /tmp; pwd'`。这种入口继承终端与 shell 的变量、作业控制和退出语义。受管执行从 `zrun run`、`zrun batch` 和 MCP 进入。
+在 Unix 上，`zrun` 依次查找 `ZRUN_SHELL`、`$XDG_CONFIG_HOME/zrun/shell`（默认 `~/.config/zrun/shell`）、`SHELL` 和 `/bin/sh`。配置文件写一行后端 shell 的绝对路径，例如 `/usr/bin/zsh`。这让 zrun 作为登录 shell 时也能使用原有后端。普通 shell 参数也可以直接传入，例如 `zrun -c 'cd /tmp; pwd'`。这种入口继承终端与 shell 的变量、作业控制和退出语义。受管执行从 `zrun run`、`zrun batch` 和 MCP 进入。
 
 ## 本地 socket
 

@@ -660,3 +660,31 @@ await *
     }
     assert_eq!(fs::read(directory.0.join("count")).unwrap(), b"xx");
 }
+
+#[test]
+fn login_shell_uses_the_configured_backend_and_env_can_override_it() {
+    use std::os::unix::process::CommandExt;
+
+    let dir = Directory::new();
+    let backend = dir.0.join("backend");
+    fs::write(&backend, "#!/bin/sh\nprintf 'backend:%s' \"$1\"\n").unwrap();
+    fs::set_permissions(&backend, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(dir.0.join("zrun")).unwrap();
+    fs::write(dir.0.join("zrun/shell"), format!("{}\n", backend.display())).unwrap();
+    let launch = || {
+        let mut command = zrun();
+        command
+            .arg0("-zrun")
+            .env("XDG_CONFIG_HOME", &dir.0)
+            .env("SHELL", env!("CARGO_BIN_EXE_zrun"))
+            .env_remove("ZRUN_SHELL")
+            .args(["-c", "printf explicit"]);
+        command
+    };
+    let configured = launch().output().unwrap();
+    assert!(configured.status.success());
+    assert_eq!(configured.stdout, b"backend:-l");
+    let overridden = launch().env("ZRUN_SHELL", "/bin/sh").output().unwrap();
+    assert!(overridden.status.success());
+    assert_eq!(overridden.stdout, b"explicit");
+}
