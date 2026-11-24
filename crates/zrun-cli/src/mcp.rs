@@ -343,35 +343,73 @@ pub(crate) fn run_remote(
                 .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
         );
     }
+    let window = match std::env::var_os("ZRUN_BATCH_WINDOW") {
+        None => 1,
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|window| (1..=8).contains(window))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ZRUN_BATCH_WINDOW must be 1..8",
+                )
+            })?,
+    };
     let mut runtime = Executor::current()?;
     let io = runtime.io().clone();
     let timer = runtime.timer();
-    let mut client = http::UnixClient::new(&io, &path, &timer, true);
+    let spawner = runtime.spawner();
+    let pool = std::sync::Arc::new(RemotePool::default());
+    let path = std::sync::Arc::new(path);
     runtime.block_on(async {
         let mut offset = 0;
-        while offset < requests.len() {
-            let mut count = MAX_BATCH_COMMANDS.min(requests.len() - offset);
-            let payload = loop {
-                let bytes = remote_payload(offset, &requests[offset..offset + count])?;
-                if bytes.len() <= MAX_MESSAGE {
-                    break bytes;
-                }
-                if count == 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "encoded request exceeds the socket message limit",
-                    ));
-                }
-                count /= 2;
-            };
-            let records = remote_records(&mut client, &payload, offset, count).await?;
-            for (index, delivery) in records.into_iter().enumerate() {
-                record(offset + index, delivery)?;
+        let mut active = std::collections::VecDeque::with_capacity(window);
+        while offset < requests.len() || !active.is_empty() {
+            while active.len() < window && offset < requests.len() {
+                let (payload, count) = encode_remote_batch(offset, &requests[offset..])?;
+                let id = offset;
+                let (pool, io, path, timer) =
+                    (pool.clone(), io.clone(), path.clone(), timer.clone());
+                let job = spawner
+                    .spawn(
+                        async move { pool.exchange(&io, &path, &timer, &payload, id, count).await },
+                    )
+                    .map_err(io::Error::other)?;
+                active.push_back((id, job));
+                offset += count;
             }
-            offset += count;
+            let (id, job) = active
+                .pop_front()
+                .expect("at least one active remote batch");
+            for (index, delivery) in job
+                .await
+                .map_err(io::Error::other)??
+                .into_iter()
+                .enumerate()
+            {
+                record(id + index, delivery)?;
+            }
         }
         Ok(())
     })?
+}
+
+fn encode_remote_batch(offset: usize, requests: &[Request]) -> io::Result<(Vec<u8>, usize)> {
+    let mut count = MAX_BATCH_COMMANDS.min(requests.len());
+    loop {
+        let bytes = remote_payload(offset, &requests[..count])?;
+        if bytes.len() <= MAX_MESSAGE {
+            return Ok((bytes, count));
+        }
+        if count == 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "encoded request exceeds the socket message limit",
+            ));
+        }
+        count /= 2;
+    }
 }
 
 #[derive(Serialize)]
@@ -466,18 +504,31 @@ impl RemotePool {
         request: Request,
         timer: &zrun::Timer,
     ) -> io::Result<Delivery> {
+        let payload = remote_payload(0, &[request])?;
+        let mut records = self.exchange(io, path, timer, &payload, 0, 1).await?;
+        Ok(records.remove(0))
+    }
+
+    async fn exchange(
+        &self,
+        io: &zrun::io::Handle,
+        path: &std::path::Path,
+        timer: &zrun::Timer,
+        payload: &[u8],
+        id: usize,
+        count: usize,
+    ) -> io::Result<Vec<Delivery>> {
         const MAX_IDLE: usize = 8;
 
-        let payload = remote_payload(0, &[request])?;
         let mut client = http::UnixClient::new(io, path, timer, true);
         client.saved = self.idle.lock().unwrap().pop();
-        let mut records = remote_records(&mut client, &payload, 0, 1).await?;
+        let records = remote_records(&mut client, payload, id, count).await?;
         if let Some(stream) = client.saved.take() {
             let mut idle = self.idle.lock().unwrap();
             if idle.len() < MAX_IDLE {
                 idle.push(stream);
             }
         }
-        Ok(records.remove(0))
+        Ok(records)
     }
 }

@@ -20,6 +20,7 @@ fn zrun() -> Command {
         .env_remove("ZRUN_MCP_TOKEN")
         .env_remove("ZRUN_POLICY")
         .env_remove("ZRUN_WORKERS")
+        .env_remove("ZRUN_BATCH_WINDOW")
         .env_remove("ZRUN_PLUGIN");
     command
 }
@@ -274,6 +275,36 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
         &format!("{}\n", reusable()),
     );
     assert_eq!(lines(&output)[0]["disposition"], "cached");
+}
+
+#[test]
+fn remote_batch_window_overlaps_requests_and_preserves_output_order() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let input = (0..17)
+        .map(|index| {
+            let script = match index {
+                0 => "while [ ! -f ready ]; do sleep .01; done",
+                16 => "touch ready",
+                _ => "true",
+            };
+            format!("{}\n", json!({"script":script,"timeout_ms":3000}))
+        })
+        .collect::<String>();
+    let mut client = zrun();
+    client
+        .arg("batch")
+        .current_dir(&directory.0)
+        .env("ZRUN_SOCKET", &socket)
+        .env("ZRUN_BATCH_WINDOW", "2");
+    let records = lines(&process_input(client, &input));
+    assert_eq!(records.len(), 17);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record["index"], index);
+        assert_eq!(record["result"]["exit_code"], 0, "{record}");
+    }
 }
 
 #[test]
