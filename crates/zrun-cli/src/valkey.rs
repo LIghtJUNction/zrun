@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, IoSlice};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -170,16 +170,22 @@ impl Valkey {
             return;
         }
         let expiry = ttl.to_string();
+        let header = format!(
+            "*5\r\n$3\r\nSET\r\n${}\r\n{key}\r\n${}\r\n",
+            key.len(),
+            value.len()
+        );
+        let tail = format!("\r\n$2\r\nPX\r\n${}\r\n{expiry}\r\n", expiry.len());
         connection
             .exchange(self, io, timer, async |socket| {
+                // Send the existing serialized result between the small RESP
+                // header and suffix without allocating a second result buffer.
                 socket
-                    .write_all(&command(&[
-                        b"SET",
-                        key.as_bytes(),
-                        &value,
-                        b"PX",
-                        expiry.as_bytes(),
-                    ]))
+                    .write_all_vectored(&mut [
+                        IoSlice::new(header.as_bytes()),
+                        IoSlice::new(&value),
+                        IoSlice::new(tail.as_bytes()),
+                    ])
                     .await
                     .ok()?;
                 let mut reply = [0; 5];

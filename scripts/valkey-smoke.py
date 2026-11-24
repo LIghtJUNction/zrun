@@ -1,4 +1,4 @@
-import json, os, pathlib, socket, subprocess, sys, tempfile, time
+import base64, json, os, pathlib, socket, subprocess, sys, tempfile, time
 binary=pathlib.Path(sys.argv[1]).resolve()
 with tempfile.TemporaryDirectory(prefix='zrun-valkey-test.') as work:
     root=pathlib.Path(work)
@@ -47,6 +47,15 @@ with tempfile.TemporaryDirectory(prefix='zrun-valkey-test.') as work:
         assert (root/'count').read_bytes()==b'x'*6
         time.sleep(ttl/1000+.05)
         observe('executed')
+        large = dict(command, script='head -c 65536 /dev/zero; head -c 65536 /dev/zero >&2',
+                     reuse=dict(command['reuse'], input_revision='large'))
+        for expected in ('executed', 'cached'):
+            row = observe(expected, cmd=large)
+            result = row['result']
+            assert not result['truncated']
+            for stream in ('stdout', 'stderr'):
+                assert result[stream]['encoding'] == 'base64'
+                assert base64.b64decode(result[stream]['data'], validate=True) == b'\0' * 65536
         server.terminate()
         server.wait(timeout=5)
         assert observe('executed')['result']['stdout']['data']=='env1'
