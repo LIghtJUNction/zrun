@@ -20,6 +20,7 @@ fn zrun() -> Command {
         .env_remove("ZRUN_MCP_TOKEN")
         .env_remove("ZRUN_POLICY")
         .env_remove("ZRUN_WORKERS")
+        .env_remove("ZRUN_IO_DRIVER")
         .env_remove("ZRUN_BATCH_WINDOW")
         .env_remove("ZRUN_PLUGIN");
     command
@@ -346,6 +347,30 @@ fn local_batch_delivers_each_result_without_waiting_for_the_next_command() {
     assert_eq!(first["result"]["stdout"]["data"], "ready");
     assert_eq!(second["index"], 0);
     assert_eq!(second["result"]["exit_code"], 0);
+}
+
+#[test]
+fn worker_io_broker_handles_unix_requests_pipes_and_deadlines() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(
+        zrun()
+            .env("ZRUN_WORKERS", "4")
+            .env("ZRUN_IO_DRIVER", "worker")
+            .args(["mcp", "--unix"])
+            .arg(&socket),
+    );
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let mut client = zrun();
+    client.arg("batch").env("ZRUN_SOCKET", &socket);
+    let records = lines(&process_input(
+        client,
+        "{\"script\":\"printf output; printf error >&2\"}\n{\"script\":\"sleep 5\",\"timeout_ms\":100}\n",
+    ));
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["result"]["stdout"]["data"], "output");
+    assert_eq!(records[0]["result"]["stderr"]["data"], "error");
+    assert_eq!(records[1]["result"]["exit_code"], 124);
 }
 
 #[test]

@@ -483,6 +483,16 @@ impl Pool {
         )
     }
 
+    /// Start a worker-driven poller with the default active-task limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid worker count, poller creation or worker creation error.
+    #[cfg(feature = "io")]
+    pub fn new_with_io(workers: usize) -> io::Result<(Self, zrun_io::Handle)> {
+        Self::with_max_tasks_and_io(workers, DEFAULT_MAX_TASKS)
+    }
+
     /// Start the pool with a poller driven by its first worker.
     ///
     /// The returned handle registers descriptors on that worker's poller.

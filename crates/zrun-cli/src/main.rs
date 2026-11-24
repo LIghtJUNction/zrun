@@ -40,6 +40,7 @@ const HELP: &str = "Usage:
 
 ZRUN_SHELL overrides the Unix zrun/shell configuration file and SHELL.
 ZRUN_WORKERS selects the worker count for the managed runtime.
+ZRUN_IO_DRIVER selects thread (default) or worker at multiple workers.
 --unix without PATH uses $XDG_RUNTIME_DIR/zrun/mcp.sock.";
 
 fn main() -> ExitCode {
