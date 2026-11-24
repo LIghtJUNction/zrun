@@ -278,6 +278,41 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
 }
 
 #[test]
+fn local_batch_delivers_each_result_without_waiting_for_the_next_command() {
+    let directory = Directory::new();
+    let mut child = zrun()
+        .arg("batch")
+        .current_dir(&directory.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = child.stdin.take().unwrap();
+        writeln!(
+            input,
+            "{}",
+            json!({"script":"while [ ! -f release ]; do sleep .01; done","timeout_ms":5000})
+        )
+        .unwrap();
+        writeln!(input, "{}", json!({"script":"printf ready"})).unwrap();
+    }
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    output.read_line(&mut first).unwrap();
+    fs::write(directory.0.join("release"), b"").unwrap();
+    let mut second = String::new();
+    output.read_line(&mut second).unwrap();
+    assert!(child.wait().unwrap().success());
+    let first: Value = serde_json::from_str(&first).unwrap();
+    let second: Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(first["index"], 1);
+    assert_eq!(first["result"]["stdout"]["data"], "ready");
+    assert_eq!(second["index"], 0);
+    assert_eq!(second["result"]["exit_code"], 0);
+}
+
+#[test]
 fn remote_batch_window_overlaps_requests_and_preserves_output_order() {
     let directory = Directory::new();
     let socket = directory.0.join("zrun.sock");

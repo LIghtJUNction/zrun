@@ -404,7 +404,7 @@ fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::er
             .filter(|line| !line.trim().is_empty())
             .map(serde_json::from_str)
             .collect();
-        let mut output = io::BufWriter::new(io::stdout().lock());
+        let mut output = io::stdout().lock();
         #[derive(serde::Serialize)]
         struct Record {
             index: usize,
