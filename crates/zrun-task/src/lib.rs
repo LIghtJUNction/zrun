@@ -277,9 +277,24 @@ impl Task {
     /// Poll and immediately drive a bounded number of notifications observed
     /// during those polls. The driver keeps the future and its waker across
     /// the inline polls. When the budget expires, it publishes one runnable.
-    pub fn run_budget(self: &Arc<Self>, mut inline_repolls: usize) {
+    pub fn run_budget(self: &Arc<Self>, inline_repolls: usize) {
+        if self.poll_budget(inline_repolls) {
+            self.enqueue();
+        }
+    }
+
+    /// Drive an owned runnable taken from its scheduler. When another runnable
+    /// is due, `requeue` must return it to that scheduler unless it has closed.
+    /// The callback owns the only publication for this transition.
+    pub fn run_owned(self: Arc<Self>, inline_repolls: usize, requeue: impl FnOnce(Arc<Self>)) {
+        if self.poll_budget(inline_repolls) {
+            requeue(self);
+        }
+    }
+
+    fn poll_budget(self: &Arc<Self>, mut inline_repolls: usize) -> bool {
         let cancelled = match self.schedule.begin() {
-            Begin::Skip => return,
+            Begin::Skip => return false,
             Begin::Poll => None,
             Begin::Cancel(reason) => Some(reason),
         };
@@ -289,7 +304,7 @@ impl Task {
 
         if let Some(reason) = cancelled {
             self.finish_failure(future, reason.error());
-            return;
+            return false;
         }
 
         let waker = task_waker(self.clone());
@@ -305,17 +320,13 @@ impl Task {
                     let mut slot = lock(&self.future);
                     *slot = Some(future);
                     match self.schedule.pending() {
-                        Pending::Idle => return,
-                        Pending::Requeue => {
-                            drop(slot);
-                            self.enqueue();
-                            return;
-                        }
+                        Pending::Idle => return false,
+                        Pending::Requeue => return true,
                         Pending::Cancel(reason) => {
                             let future = slot.take().expect("poll owner returned its future");
                             drop(slot);
                             self.finish_failure(future, reason.error());
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -325,12 +336,12 @@ impl Task {
                     // cannot replace that already delivered result.
                     let _ = drop_future(future);
                     self.finished();
-                    return;
+                    return false;
                 }
                 Err(payload) => {
                     self.schedule.complete();
                     self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
-                    return;
+                    return false;
                 }
             }
         }

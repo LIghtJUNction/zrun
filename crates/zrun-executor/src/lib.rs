@@ -219,7 +219,7 @@ impl Scheduler for Shared {
                     .get(task.registry_index())
                     .is_some_and(|registered| Arc::ptr_eq(registered, &task))
             {
-                // Task's lock serialized Idle/Running -> Queued and gives
+                // Task's state serialized Idle/Running -> Queued and gives
                 // exactly one caller this insertion responsibility.
                 state.ready.push_back(task);
                 true
@@ -410,7 +410,7 @@ impl Runtime {
                 let Some(task) = self.shared.pop() else {
                     break;
                 };
-                task.run_budget(INLINE_REPOLLS);
+                task.run_owned(INLINE_REPOLLS, |task| self.shared.enqueue(task));
                 // Poll at least one available task even if the root wakes
                 // itself on every poll; neither side can starve the other.
                 if signal.notified.load(Ordering::Acquire) {

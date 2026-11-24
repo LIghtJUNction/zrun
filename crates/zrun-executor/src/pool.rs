@@ -160,7 +160,9 @@ impl SharedPool {
                 self.clock.turn();
             }
             if let Some(task) = self.take(own) {
-                task.run_budget(INLINE_REPOLLS);
+                task.run_owned(INLINE_REPOLLS, |task| {
+                    self.publish(task, own, true, Arrival::Wake)
+                });
                 continue;
             }
             worker.parker.parking.arm();
@@ -169,7 +171,9 @@ impl SharedPool {
             }
             if let Some(task) = self.take(own) {
                 worker.parker.parking.disarm();
-                task.run_budget(INLINE_REPOLLS);
+                task.run_owned(INLINE_REPOLLS, |task| {
+                    self.publish(task, own, true, Arrival::Wake)
+                });
                 continue;
             }
             if own == 0 {
@@ -191,6 +195,10 @@ impl SharedPool {
         let caller = self.local_worker();
         let owner = caller
             .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
+        self.publish(task, owner, caller.is_some(), arrival);
+    }
+
+    fn publish(&self, task: Arc<Task>, owner: usize, local: bool, arrival: Arrival) {
         let worker = &self.workers[owner];
         let backlog = {
             let mut ready = lock(&worker.ready);
@@ -202,7 +210,7 @@ impl SharedPool {
         };
         // A worker publishing to its own queue cannot be parked. An external
         // producer still owes its owner the full arm/notify handshake.
-        let woke_owner = caller.is_none() && worker.parker.notify_waiter();
+        let woke_owner = !local && worker.parker.notify_waiter();
         if !woke_owner && (backlog > 1 || matches!(arrival, Arrival::Spawn)) {
             self.notify_peer(owner);
         }
