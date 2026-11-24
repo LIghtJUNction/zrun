@@ -112,15 +112,8 @@ trait EchoStream {
 }
 
 impl EchoStream for Stream {
-    async fn receive(&mut self, mut bytes: &mut [u8]) -> io::Result<()> {
-        while !bytes.is_empty() {
-            let count = self.read(bytes).await?;
-            if count == 0 {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-            bytes = &mut bytes[count..];
-        }
-        Ok(())
+    async fn receive(&mut self, bytes: &mut [u8]) -> io::Result<()> {
+        self.read_exact(bytes).await
     }
 
     async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {

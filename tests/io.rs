@@ -1,6 +1,6 @@
 #![cfg(feature = "io")]
 
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{
@@ -196,6 +196,85 @@ fn caller_driven_tcp_progresses_while_tasks_remain_runnable() {
             .expect_err("cancel running task")
             .is_cancelled()
     );
+}
+
+#[test]
+fn tcp_read_exact_resumes_after_a_partial_read_and_reports_early_eof() {
+    let mut runtime = Runtime::new();
+    let mut poller = Poller::new().unwrap();
+    let mut listener = poller
+        .handle()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (prefix_written, prefix_ready) = mpsc::channel();
+    let (send_suffix, wait_suffix) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(b"ab").unwrap();
+        prefix_written.send(()).unwrap();
+        wait_suffix.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream.write_all(b"cde").unwrap();
+    });
+    prefix_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    runtime
+        .block_on_with_io(&mut poller, async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut exact = [0; 4];
+            {
+                let mut read = std::pin::pin!(stream.read_exact(&mut exact));
+                poll_fn(|cx| {
+                    assert!(read.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                send_suffix.send(()).unwrap();
+                read.await.unwrap();
+            }
+            assert_eq!(&exact, b"abcd");
+            let mut short = [0; 2];
+            assert_eq!(
+                stream.read_exact(&mut short).await.unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+            assert_eq!(short[0], b'e');
+            stream.read_exact(&mut []).await.unwrap();
+        })
+        .unwrap();
+    client.join().unwrap();
+}
+
+#[test]
+fn cancelling_tcp_read_exact_allows_a_new_reader_to_receive_the_suffix() {
+    let mut runtime = Runtime::new();
+    let mut poller = Poller::new().unwrap();
+    let mut listener = poller
+        .handle()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(b"ab").unwrap();
+    runtime
+        .block_on_with_io(&mut poller, async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut partial = [0; 4];
+            {
+                let mut read = std::pin::pin!(stream.read_exact(&mut partial));
+                poll_fn(|cx| {
+                    assert!(read.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            let consumed = partial.iter().take_while(|&&byte| byte != 0).count();
+            assert!(consumed <= 2);
+            assert_eq!(&partial[..consumed], &b"ab"[..consumed]);
+            client.write_all(b"cd").unwrap();
+            stream.read_exact(&mut partial[consumed..]).await.unwrap();
+            assert_eq!(&partial, b"abcd");
+        })
+        .unwrap();
 }
 
 #[test]

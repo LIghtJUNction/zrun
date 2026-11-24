@@ -288,6 +288,32 @@ impl Stream {
             .await
     }
 
+    /// Fill the supplied buffer, waiting for input as needed.
+    /// Cancelling the future can leave a prefix in the buffer and consumes
+    /// those bytes from the stream.
+    ///
+    /// # Errors
+    /// Returns an OS or reactor shutdown error, or `UnexpectedEof` if the
+    /// stream ends before the buffer is full. A prefix may have been read.
+    pub async fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        self.0
+            .ready(Direction::Read, |socket| {
+                while !buf.is_empty() {
+                    let count = socket.read(buf)?;
+                    if count == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    let (_, remaining) = std::mem::take(&mut buf).split_at_mut(count);
+                    buf = remaining;
+                }
+                Ok(())
+            })
+            .await
+    }
+
     /// Append a bounded read to a byte buffer, returning the number read.
     ///
     /// Scratch space belongs to the active poll, so an idle connection retains
