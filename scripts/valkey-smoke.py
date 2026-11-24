@@ -1,4 +1,4 @@
-import json, os, pathlib, subprocess, sys, tempfile, time
+import json, os, pathlib, socket, subprocess, sys, tempfile, time
 binary=pathlib.Path(sys.argv[1]).resolve()
 with tempfile.TemporaryDirectory(prefix='zrun-valkey-test.') as work:
     root=pathlib.Path(work)
@@ -53,7 +53,34 @@ with tempfile.TemporaryDirectory(prefix='zrun-valkey-test.') as work:
         no_socket={k:v for k,v in env.items() if k!='ZRUN_VALKEY_SOCKET'}
         observe('executed',environ=no_socket)
         assert (root/'count').read_bytes()==b'x'*9
-        print('Valkey restart hit, PX expiry, trust domain, tool and environment identities, zguard, TTL zero, outage and disabled mode passed')
+        unresponsive = root / 'unresponsive.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(unresponsive))
+            listener.listen()
+            script = root / 'outage.zrun'
+            jobs = [
+                dict(command, script='printf x',
+                     reuse=dict(command['reuse'], input_revision=f'outage-{index}'))
+                for index in range(16)
+            ]
+            script.write_text('# zrun:1\n' + ''.join(f'shell {json.dumps(job)}\n' for job in jobs))
+            result = subprocess.run([binary, script], cwd=root,
+                                    env=dict(env, ZRUN_VALKEY_SOCKET=str(unresponsive)),
+                                    capture_output=True, check=True, timeout=10)
+            assert result.stdout == b'x' * len(jobs)
+            listener.settimeout(1)
+            connection, _ = listener.accept()
+            with connection:
+                assert b'GET' in connection.recv(1024)
+            listener.setblocking(False)
+            try:
+                unexpected, _ = listener.accept()
+            except BlockingIOError:
+                pass
+            else:
+                unexpected.close()
+                raise AssertionError('broker retried Valkey inside the cooldown')
+        print('Valkey restart hit, PX expiry, trust domain, tool and environment identities, zguard, TTL zero, outage cooldown and disabled mode passed')
     finally:
         if server.poll() is None:
             server.terminate(); server.wait(timeout=5)

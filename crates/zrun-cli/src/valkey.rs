@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -10,12 +11,15 @@ use zrun::io::{Handle, Stream};
 use crate::execution::{Request, ResultRecord};
 
 const TIMEOUT: Duration = Duration::from_millis(50);
+const RETRY_DELAY_MS: u64 = 1000;
 const MAX_VALUE: usize = 800 * 1024;
 
 pub(crate) struct Valkey {
     path: PathBuf,
     prefix: String,
     environment: Sha256,
+    started: Instant,
+    retry_at_ms: AtomicU64,
 }
 
 #[derive(Default)]
@@ -72,7 +76,28 @@ impl Valkey {
             path,
             prefix: format!("zrun:v1:{domain}:"),
             environment,
+            started: Instant::now(),
+            retry_at_ms: AtomicU64::new(0),
         }))
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    fn available(&self) -> bool {
+        self.elapsed_ms() >= self.retry_at_ms.load(Ordering::Relaxed)
+    }
+
+    fn defer_retries(&self) {
+        self.retry_at_ms.fetch_max(
+            self.elapsed_ms().saturating_add(RETRY_DELAY_MS),
+            Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn key(&self, request: &Request) -> Option<String> {
@@ -91,7 +116,7 @@ impl Valkey {
         ttl: u64,
     ) -> Option<(ResultRecord, Instant)> {
         connection
-            .exchange(&self.path, io, timer, async |socket| {
+            .exchange(self, io, timer, async |socket| {
                 socket
                     .write_all(&command(&[b"GET", key.as_bytes()]))
                     .await
@@ -132,6 +157,9 @@ impl Valkey {
         ttl: u64,
         result: &ResultRecord,
     ) {
+        if !self.available() {
+            return;
+        }
         let Some(expires_ms) = now_ms().and_then(|now| now.checked_add(ttl)) else {
             return;
         };
@@ -143,7 +171,7 @@ impl Valkey {
         }
         let expiry = ttl.to_string();
         connection
-            .exchange(&self.path, io, timer, async |socket| {
+            .exchange(self, io, timer, async |socket| {
                 socket
                     .write_all(&command(&[
                         b"SET",
@@ -165,7 +193,7 @@ impl Valkey {
 impl Connection {
     async fn exchange<T>(
         &mut self,
-        path: &Path,
+        cache: &Valkey,
         io: &Handle,
         timer: &Timer,
         operation: impl AsyncFnOnce(&mut Stream) -> Option<T>,
@@ -173,17 +201,23 @@ impl Connection {
         // Keep the socket only after a complete exchange. A timed-out or
         // cancelled operation can leave unread or partial RESP bytes.
         let previous = self.0.take();
-        let (socket, result) = timer
+        if !cache.available() {
+            return None;
+        }
+        let response = timer
             .timeout_at(Instant::now() + TIMEOUT, async {
                 let mut socket = match previous {
                     Some(socket) => socket,
-                    None => io.connect_unix(path).await.ok()?,
+                    None => io.connect_unix(&cache.path).await.ok()?,
                 };
                 let result = operation(&mut socket).await?;
                 Some((socket, result))
             })
-            .await
-            .ok()??;
+            .await;
+        let Ok(Some((socket, result))) = response else {
+            cache.defer_retries();
+            return None;
+        };
         self.0 = Some(socket);
         Some(result)
     }
