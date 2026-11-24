@@ -399,17 +399,12 @@ impl Broker {
             io: io.clone(),
             timer,
         });
-        let mut workers = Vec::with_capacity(PARALLEL);
-        for slot in 0..PARALLEL {
-            match spawner.spawn(worker(shared.clone(), slot)) {
-                Ok(worker) => workers.push(worker),
-                Err(error) => {
-                    for worker in &workers {
-                        worker.abort();
-                    }
-                    return Err(io::Error::other(error));
-                }
+        let workers = spawner.spawn_batch((0..PARALLEL).map(|slot| worker(shared.clone(), slot)));
+        if let Some(error) = workers.iter().find_map(|worker| worker.as_ref().err()) {
+            for worker in workers.iter().filter_map(|worker| worker.as_ref().ok()) {
+                worker.abort();
             }
+            return Err(io::Error::other(*error));
         }
         Ok(Self { shared })
     }

@@ -87,4 +87,21 @@ impl Spawner {
             Self::Parallel(spawner) => spawner.spawn(future),
         }
     }
+
+    pub(crate) fn spawn_batch<F>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Vec<Result<JoinHandle<F::Output>, SpawnError>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self {
+            Self::Current(spawner) => futures
+                .into_iter()
+                .map(|future| spawner.spawn(future))
+                .collect(),
+            Self::Parallel(spawner) => spawner.spawn_batch(futures),
+        }
+    }
 }
