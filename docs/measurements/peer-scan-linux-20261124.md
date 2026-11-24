@@ -120,3 +120,13 @@ Linux 7.3.5-arch1-1、Intel Core i9-12900HX、Rust 1.100.0，release 进程固�
 工作区 114 项测试和严格 Clippy 通过，1 项按既有配置忽略。初始数据在 `dist/zrun-external-helper-{matrix,tail}-w16/report.json`。
 
 百万任务与主线的 20 对独立样本中，跨线程 P99 比值为 1.064 [0.977, 1.113]。十万任务与仅使用提示位的候选直接对照 30 对，P99 比值为 0.987 [0.944, 1.031]。两组均未确认补发通知消除了尾延迟回退。未采用该改动，数据在 `dist/zrun-external-helper-{million,vs-hint}-w16/report.json`，增量补丁在 `dist/zrun-external-helper-experiment.patch`。
+
+## 优先窃取队首任务
+
+候选 `1e43b3e` 在普通宽线程池中让窃取者立即运行队首任务，转移剩余批次仍从队尾取。候选包含首次扫描提示位，对照 `d38ba80`。Linux release、CPU 0–15、16 worker、100,000 任务，共 132 个样本通过。吞吐、CPU 和自唤醒为 12 对，跨线程 P99 为 30 对。
+
+| 创建回收吞吐 ↑ | 唤醒吞吐 ↑ | 每次唤醒 CPU ↓ | 自唤醒 P99 ↓ | 跨线程唤醒 P99 ↓ |
+| ---: | ---: | ---: | ---: | ---: |
+| 1.270 [1.135, 1.296] | 1.074 [1.000, 1.165] | 0.759 [0.680, 0.805] | 0.762 [0.680, 0.807] | 1.058 [1.019, 1.099] |
+
+工作区测试和严格 Clippy 通过。组合候选确认出现尾延迟回退，未合入。报告在 `dist/zrun-oldest-steal-{matrix,tail}-w16/report.json`，增量补丁在 `dist/zrun-oldest-steal-experiment.patch`。
