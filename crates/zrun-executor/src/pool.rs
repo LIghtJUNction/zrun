@@ -75,17 +75,14 @@ impl SharedPool {
         Ok(join)
     }
 
-    fn owner(&self) -> usize {
+    fn local_worker(&self) -> Option<usize> {
         let identity = std::ptr::from_ref(self) as usize;
-        let local = CURRENT_WORKER
+        CURRENT_WORKER
             .try_with(|cell| cell.get())
             .ok()
             .flatten()
-            .filter(|(pool, _)| *pool == identity);
-        local.map_or_else(
-            || self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len(),
-            |(_, worker)| worker,
-        )
+            .filter(|(pool, _)| *pool == identity)
+            .map(|(_, worker)| worker)
     }
 
     fn take(&self, own: usize) -> Option<Arc<Task>> {
@@ -189,7 +186,9 @@ impl SharedPool {
 
 impl SharedPool {
     fn schedule(&self, task: Arc<Task>, arrival: Arrival) {
-        let owner = self.owner();
+        let caller = self.local_worker();
+        let owner = caller
+            .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
         let worker = &self.workers[owner];
         let backlog = {
             let mut ready = lock(&worker.ready);
@@ -199,7 +198,9 @@ impl SharedPool {
             ready.push_back(task);
             ready.len()
         };
-        let woke_owner = worker.parker.notify_waiter();
+        // A worker publishing to its own queue cannot be parked. An external
+        // producer still owes its owner the full arm/notify handshake.
+        let woke_owner = caller.is_none() && worker.parker.notify_waiter();
         if !woke_owner && (backlog > 1 || matches!(arrival, Arrival::Spawn)) {
             self.notify_peer(owner);
         }
@@ -208,7 +209,10 @@ impl SharedPool {
     fn notify_peer(&self, owner: usize) {
         let len = self.workers.len();
         for offset in 1..len {
-            if self.workers[(owner + offset) % len].parker.notify_waiter() {
+            let peer = &self.workers[(owner + offset) % len].parker;
+            // Peer stealing is opportunistic. Only claim an armed wait
+            // rather than writing to running peers' parking cache lines.
+            if peer.parking.is_armed() && peer.notify_waiter() {
                 break;
             }
         }

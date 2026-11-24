@@ -24,6 +24,11 @@ impl ParkingFlag {
         self.waiting.swap(false, Ordering::AcqRel);
     }
 
+    /// A hint for choosing a peer to wake. Owners still use the RMW handshake.
+    pub(super) fn is_armed(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
+    }
+
     /// The caller first publishes work, then must unpark iff this returns true.
     pub(super) fn notify(&self) -> bool {
         // Exactly one notifier claims an armed wait. Clearing the flag only

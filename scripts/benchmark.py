@@ -288,7 +288,7 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     return None
 
 
-def collect_sample(args, output, round_index, tasks, workers, scenario, engine):
+def collect_sample(args, output, round_index, tasks, scenario, engine, *, workers=1):
     prefix = f"r{round_index:03d}-w{workers}-t{tasks}-{scenario}-{engine}"
     command = [str(args.binary), "--engine", engine, "--scenario", scenario, "--tasks", str(tasks),
                "--workers", str(workers), "--yields", str(args.yields), "--latency-samples", str(args.latency_samples),
@@ -439,7 +439,7 @@ def main():
                     for engine in (("zrun", "tokio") if i % 2 == 0 else ("tokio", "zrun")):
                         if STOP_REQUESTED:
                             break
-                        sample = collect_sample(args, output, i, tasks, workers, scenario, engine)
+                        sample = collect_sample(args, output, i, tasks, scenario, engine, workers=workers)
                         report["samples"].append(sample)
                         atomic_json(output / "report.json", report)
                         print(f"round={i + 1}/{args.rounds} workers={workers} tasks={tasks} scenario={scenario} engine={engine} status={sample['status']}", flush=True)

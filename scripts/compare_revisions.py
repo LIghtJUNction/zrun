@@ -79,6 +79,7 @@ def main():
                         default=list(bench.TASK_SCALES))
     parser.add_argument("--scenarios", nargs="+", choices=bench.SCENARIOS,
                         default=list(bench.SCENARIOS))
+    parser.add_argument("--workers", type=int, choices=bench.WORKERS, default=1)
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--bootstrap", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20261123)
@@ -127,7 +128,7 @@ def main():
                     if bench.STOP_REQUESTED:
                         break
                     args.binary = getattr(args, variant)
-                    sample = bench.collect_sample(args, output / variant, i, tasks, scenario, "zrun")
+                    sample = bench.collect_sample(args, output / variant, i, tasks, scenario, "zrun", workers=args.workers)
                     sample["variant"] = variant
                     sample["stdout"] = f"{variant}/{sample['stdout']}"
                     sample["stderr"] = f"{variant}/{sample['stderr']}"
