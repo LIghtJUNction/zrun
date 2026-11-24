@@ -26,3 +26,25 @@ pub trait Admission {
         timeout_ms: u64,
     ) -> Result<u32, zplugin::Error>;
 }
+
+/// Admission interface that also receives the command's positional arguments.
+#[zplugin::interface(id = "dev.project-z.zrun.admission", version = 2)]
+pub trait AdmissionV2 {
+    /// Return the ALLOW or DENY decision for this invocation.
+    ///
+    /// Each positional argument is UTF-8 followed by one NUL byte. A zero-length
+    /// buffer means no arguments, while one NUL byte means one empty argument.
+    /// The generated shell argument zero is constant and omitted.
+    ///
+    /// # Errors
+    ///
+    /// A plugin error fails the request without executing the command.
+    fn command(
+        &mut self,
+        shell: &str,
+        cwd: &str,
+        script: &str,
+        timeout_ms: u64,
+        args: &[u8],
+    ) -> Result<u32, zplugin::Error>;
+}

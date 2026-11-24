@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 
 use zrun::sync::{self, Sender};
-use zrun_plugin_api::{ALLOW, AdmissionApi, DENY};
+use zrun_plugin_api::{ALLOW, AdmissionApi, AdmissionV2Api, DENY};
 
 use crate::execution::Request;
 
@@ -14,6 +14,7 @@ struct Check {
     shell: PathBuf,
     cwd: PathBuf,
     script: Arc<str>,
+    args: Arc<Vec<String>>,
     timeout_ms: u64,
     reply: Sender<io::Result<()>>,
 }
@@ -42,7 +43,15 @@ impl Plugin {
                         return;
                     }
                 };
-                let mut admission = match AdmissionApi::create(&library) {
+                let admission = match AdmissionV2Api::create(&library) {
+                    Ok(admission) => Ok((None, Some(admission))),
+                    Err(zplugin::Error::InterfaceVersion {
+                        expected: 2,
+                        actual: 1,
+                    }) => AdmissionApi::create(&library).map(|admission| (Some(admission), None)),
+                    Err(error) => Err(error),
+                };
+                let (mut legacy, mut current) = match admission {
                     Ok(admission) => admission,
                     Err(error) => {
                         let _ = startup.send(Err(io::Error::other(error)));
@@ -53,18 +62,33 @@ impl Plugin {
                     return;
                 }
                 for check in receive {
-                    let result = admission.command(
-                        check
-                            .shell
-                            .to_str()
-                            .expect("shell path was validated before admission"),
-                        check
-                            .cwd
-                            .to_str()
-                            .expect("working directory was validated before admission"),
-                        &check.script,
-                        check.timeout_ms,
-                    );
+                    let shell = check
+                        .shell
+                        .to_str()
+                        .expect("shell path was validated before admission");
+                    let cwd = check
+                        .cwd
+                        .to_str()
+                        .expect("working directory was validated before admission");
+                    let result = if let Some(admission) = current.as_mut() {
+                        let mut args = Vec::new();
+                        for arg in check.args.iter() {
+                            args.extend_from_slice(arg.as_bytes());
+                            args.push(0);
+                        }
+                        admission.command(shell, cwd, &check.script, check.timeout_ms, &args)
+                    } else if check.args.is_empty() {
+                        legacy
+                            .as_mut()
+                            .expect("legacy admission was loaded")
+                            .command(shell, cwd, &check.script, check.timeout_ms)
+                    } else {
+                        let _ = check.reply.send(Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "the configured admission plugin cannot inspect positional arguments",
+                        )));
+                        continue;
+                    };
                     let decision = match result {
                         Ok(ALLOW) => Ok(()),
                         Ok(DENY) => Err(io::Error::new(
@@ -84,12 +108,6 @@ impl Plugin {
     }
 
     pub(crate) async fn authorize(&self, shell: &Path, request: &Request) -> io::Result<()> {
-        if !request.args.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "the configured admission plugin cannot inspect positional arguments",
-            ));
-        }
         let (reply, response) = sync::channel();
         let check = Check {
             shell: shell.to_path_buf(),
@@ -98,6 +116,7 @@ impl Plugin {
                 .clone()
                 .expect("working directory was resolved before admission"),
             script: request.script.clone(),
+            args: request.args.clone(),
             timeout_ms: request.timeout_ms,
             reply,
         };

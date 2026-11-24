@@ -15,3 +15,7 @@ zplugin = { git = "https://github.com/LIghtJUNction/zplugin.git", features = ["s
 [[example]]
 name = "restrictive"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "restrictive_args"
+crate-type = ["cdylib"]
