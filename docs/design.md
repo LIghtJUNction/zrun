@@ -27,9 +27,11 @@ P0 支持跨线程唤醒和通过 Spawner 提交 Send Future，但只有调用 b
 
 ## 任务生命周期不变量
 
-任务的调度标记必须区别“已在队列”“正在 poll”“poll 中再次收到 wake”和“已终止”。一个活跃任务同时至多有一个可执行队列项；poll 中的通知会在退出 poll 后保留为下一次调度请求。完成后到达的旧 waker 只释放其持有的引用，不重新 poll Future。
+任务的调度标记必须区别“已在队列”“正在 poll”“poll 中再次收到 wake”和“已终止”。一个活跃任务同时至多有一个可执行队列项；poll 中的通知会在退出 poll 后保留为下一次调度请求。已经完成的任务收到旧 waker 的通知后，保持终止状态。
 
 Future 的所有权必须在每次转换中明确。执行器取得 poll 权限后暂时拥有 Future；Pending 把它交回任务，Ready、abort、panic 与 shutdown 进入唯一终止路径。任务出队、取消或外部唤醒之间的竞争不能造成两份 Future 所有权，也不能释放正在 poll 的 Future。
+
+任务把 poll、就绪通知、取消和完成状态保存在同一个原子字节。空闲任务的第一个唤醒取得入队权，运行中的唤醒由当前 poll 处理。向队列交还任务前，当前 poll 先在互斥锁内放回 Future，再切换原子状态。关闭只有在没有活跃 poll 所有者时才能取走 Future。内联复 poll 保持 poll 所有权，并在每次授权前检查通知与取消。[实测与模型](measurements/task-atomic-linux-20261124.md)
 
 RawWaker 中的指针代表一个真实的引用计数所有权。`clone` 增加一次所有权，`wake` 和 `drop` 各消耗传入的那一次，`wake_by_ref` 保留原所有权。注释必须解释每处 from_raw/into_raw 的配对、对象存活期和线程安全条件；正确性测试要覆盖最后一个 waker 释放、完成后的旧 waker、重复 wake 和取消风暴。
 
