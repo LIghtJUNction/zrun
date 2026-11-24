@@ -81,6 +81,7 @@ def main():
                         default=list(bench.SCENARIOS))
     parser.add_argument("--workers", type=int, choices=bench.WORKERS, default=1)
     parser.add_argument("--rounds", type=int, default=10)
+    parser.add_argument("--yields", type=int, default=16)
     parser.add_argument("--bootstrap", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--timeout", type=float, default=120)
@@ -90,9 +91,11 @@ def main():
         parser.error("rounds must be 1..1000 and bootstrap 100..100000")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 86400:
         parser.error("timeout must be finite and in (0,86400]")
+    if not 1 <= args.yields <= 10000:
+        parser.error("yields must be 1..10000")
     args.tasks = list(dict.fromkeys(args.tasks))
     args.scenarios = list(dict.fromkeys(args.scenarios))
-    args.yields, args.latency_samples, args.hold_ms = 16, 10000, 20
+    args.latency_samples, args.hold_ms = 10000, 20
     try:
         if args.affinity:
             if not hasattr(os, "sched_setaffinity"):
