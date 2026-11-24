@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -265,6 +265,24 @@ impl Delivery {
     }
 }
 
+pub(crate) enum Ticket {
+    Cached(Option<Delivery>),
+    Pending(Receiver<Delivery>),
+}
+
+impl Future for Ticket {
+    type Output = Result<Delivery, sync::RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Cached(delivery) => {
+                Poll::Ready(Ok(delivery.take().expect("ticket already polled")))
+            }
+            Self::Pending(receiver) => Pin::new(receiver).poll(cx),
+        }
+    }
+}
+
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct Key {
     script: Arc<str>,
@@ -433,7 +451,7 @@ impl Broker {
         Ok(request)
     }
 
-    pub(crate) async fn submit(&self, request: Request) -> io::Result<Receiver<Delivery>> {
+    pub(crate) async fn submit(&self, request: Request) -> io::Result<Ticket> {
         let request = self.authorize(request)?;
         if let Some(plugin) = &self.shared.plugin {
             plugin.authorize(&self.shared.shell, &request).await?;
@@ -454,10 +472,7 @@ impl Broker {
         ticket
     }
 
-    pub(crate) async fn submit_batch(
-        &self,
-        requests: Vec<Request>,
-    ) -> Vec<io::Result<Receiver<Delivery>>> {
+    pub(crate) async fn submit_batch(&self, requests: Vec<Request>) -> Vec<io::Result<Ticket>> {
         let mut results = Vec::with_capacity(requests.len());
         if requests.len() == 1 || self.shared.plugin.is_some() {
             for request in requests {
@@ -508,8 +523,6 @@ impl Broker {
 struct Submission {
     request: Request,
     key: Option<Arc<Key>>,
-    sender: Sender<Delivery>,
-    receiver: Receiver<Delivery>,
 }
 
 impl Submission {
@@ -525,33 +538,17 @@ impl Submission {
                 reuse: reuse.clone(),
             })
         });
-        let (sender, receiver) = sync::channel();
-        Self {
-            request,
-            key,
-            sender,
-            receiver,
-        }
+        Self { request, key }
     }
 }
 
 impl State {
-    fn enqueue(
-        &mut self,
-        Submission {
-            request,
-            key,
-            sender,
-            receiver,
-        }: Submission,
-    ) -> io::Result<Receiver<Delivery>> {
+    fn enqueue(&mut self, Submission { request, key }: Submission) -> io::Result<Ticket> {
         if let Some(delivery) = key.as_ref().and_then(|key| self.cache.get(key)) {
-            // This receiver has not been returned or polled.
-            let _ = sender.send(Delivery {
+            return Ok(Ticket::Cached(Some(Delivery {
                 disposition: Disposition::Cached,
                 result: delivery,
-            });
-            return Ok(receiver);
+            })));
         }
         if self.waiters == MAX_WAITERS {
             return Err(io::Error::new(
@@ -562,12 +559,13 @@ impl State {
         if let Some(key) = &key
             && let Some(subscribers) = self.in_flight.get_mut(key)
         {
+            let (sender, receiver) = sync::channel();
             subscribers.push(Subscriber {
                 sender,
                 disposition: Disposition::Coalesced,
             });
             self.waiters += 1;
-            return Ok(receiver);
+            return Ok(Ticket::Pending(receiver));
         }
         let size = request.size();
         if size > MAX_PENDING_BYTES - self.pending_bytes {
@@ -576,6 +574,7 @@ impl State {
                 "command queue byte limit reached",
             ));
         }
+        let (sender, receiver) = sync::channel();
         let subscriber = Subscriber {
             sender,
             disposition: Disposition::Executed,
@@ -593,7 +592,7 @@ impl State {
             completion,
             size,
         });
-        Ok(receiver)
+        Ok(Ticket::Pending(receiver))
     }
 }
 

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::execution::{Batch, Delivery, Request};
+use crate::execution::{Batch, Delivery, Request, Ticket};
 
 pub(crate) const HEADER: &str = "# zrun:1";
 
@@ -144,7 +144,7 @@ pub(crate) fn run(shell: PathBuf, source: &str) -> io::Result<u8> {
                     let _ = sender.send(delivery);
                 })
                 .map_err(io::Error::other)?;
-            Ok(receiver)
+            Ok(Ticket::Pending(receiver))
         }))?
     } else {
         Batch::new(shell)?.drive(async move |broker| {
@@ -155,7 +155,7 @@ pub(crate) fn run(shell: PathBuf, source: &str) -> io::Result<u8> {
 
 async fn execute(
     steps: Vec<Step>,
-    mut submit: impl AsyncFnMut(Request) -> io::Result<zrun::sync::Receiver<Delivery>>,
+    mut submit: impl AsyncFnMut(Request) -> io::Result<Ticket>,
 ) -> io::Result<u8> {
     let mut pending = std::collections::BTreeMap::new();
     let mut status = 0;
