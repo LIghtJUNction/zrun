@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one persistent P0 runtime for an explicitly selected duration.
+"""Run one persistent runtime for an explicitly selected duration.
 
 Ctrl-C/SIGTERM terminates the owned child and preserves partial JSONL evidence.
 The default does not start a 24-hour run: --duration-seconds is mandatory.
@@ -92,7 +92,7 @@ def valid_finish(finish, args):
     if not isinstance(finish, dict):
         return False
     for key, expected in {"schema_version": 1, "event": "finish", "status": "ok", "engine": args.engine,
-                          "scenario": "soak", "workers": 1, "tasks": args.tasks, "active_tasks": 0}.items():
+                          "scenario": "soak", "workers": args.workers, "tasks": args.tasks, "active_tasks": 0}.items():
         if finish.get(key) != expected:
             return False
     elapsed = finish.get("elapsed_secs")
@@ -174,11 +174,6 @@ def main():
     report = {"schema_version": 1, "status": "running", "environment": bench.environment(args.binary),
               "config": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
               "duration_24h_covered": False, "full_soak_gate": "not_evaluated"}
-    if args.workers != 1:
-        report.update(status="unsupported", reason="P0 current-thread worker=1 only", future_worker_matrix=list(bench.WORKERS))
-        bench.atomic_json(output / "report.json", report)
-        print(output / "report.json")
-        return 2
     bench.install_signals()
     bench.atomic_json(output / "report.json", report)
     samples, next_sample = [], 0.0
@@ -191,7 +186,7 @@ def main():
                 rss_file.write(json.dumps(sample, allow_nan=False) + "\n")
                 next_sample = elapsed + args.sample_seconds
         command = [str(args.binary), "--engine", args.engine, "--scenario", "soak", "--tasks", str(args.tasks),
-                   "--workers", "1", "--yields", str(args.yields), "--duration-secs", str(args.duration_seconds),
+                   "--workers", str(args.workers), "--yields", str(args.yields), "--duration-secs", str(args.duration_seconds),
                    "--sample-interval-ms", str(args.sample_seconds * 1000)]
         process = bench.run_process(command, output / "runtime-events.jsonl", output / "runtime-stderr.txt",
                                     args.duration_seconds + args.grace_seconds, tick=tick,
