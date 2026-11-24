@@ -16,6 +16,8 @@ use crate::executor::{Executor, Spawner};
 
 const MAX_CONNECTIONS: usize = 2_048;
 const MAX_HEADERS: usize = 16 * 1024;
+const MAX_REQUEST_BUFFER: usize = MAX_MESSAGE + MAX_HEADERS;
+const MAX_BUFFERED_REQUESTS: usize = 32 * 1024 * 1024;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) fn serve(
@@ -33,7 +35,7 @@ pub(super) fn serve(
         &runtime.spawner(),
     )?);
     let spawner = runtime.spawner();
-    let connections = Arc::new(AtomicUsize::new(0));
+    let limits = Arc::new(Limits::default());
     let mut listeners = Vec::new();
     let mut socket_path = None;
     if let Some(addr) = tcp {
@@ -87,7 +89,7 @@ pub(super) fn serve(
                     broker.clone(),
                     timer.clone(),
                     spawner.clone(),
-                    connections.clone(),
+                    limits.clone(),
                 ))
                 .map_err(io::Error::other)?,
         );
@@ -165,22 +167,29 @@ struct Access {
     hosts: Vec<String>,
 }
 
-struct Connection(Arc<AtomicUsize>);
+#[derive(Default)]
+struct Limits {
+    connections: AtomicUsize,
+    ingress: AtomicUsize,
+}
+
+struct Connection(Arc<Limits>);
 
 impl Connection {
-    fn acquire(connections: &Arc<AtomicUsize>) -> Option<Self> {
-        connections
+    fn acquire(limits: &Arc<Limits>) -> Option<Self> {
+        limits
+            .connections
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_CONNECTIONS).then_some(count + 1)
             })
             .ok()
-            .map(|_| Self(connections.clone()))
+            .map(|_| Self(limits.clone()))
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.0.connections.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -190,16 +199,15 @@ async fn accept(
     broker: Arc<Broker>,
     timer: Timer,
     spawner: Spawner,
-    connections: Arc<AtomicUsize>,
+    limits: Arc<Limits>,
 ) -> io::Result<()> {
     loop {
         let mut stream = endpoint.accept().await?;
-        if let Some(slot) = Connection::acquire(&connections) {
+        if let Some(slot) = Connection::acquire(&limits) {
             let (access, broker, timer) = (access.clone(), broker.clone(), timer.clone());
             spawner
                 .spawn(async move {
-                    let _slot = slot;
-                    let _ = handle(&mut stream, &access, &broker, &timer).await;
+                    let _ = handle(&mut stream, &access, &broker, &timer, &slot.0.ingress).await;
                 })
                 .map_err(io::Error::other)?;
         }
@@ -207,12 +215,7 @@ async fn accept(
     }
 }
 
-enum Request {
-    Post(Vec<u8>),
-    Reply(Status),
-}
-
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Status {
     Ok,
     Accepted,
@@ -223,6 +226,7 @@ enum Status {
     MethodNotAllowed,
     TooLarge,
     UnsupportedMedia,
+    Busy,
 }
 
 impl Status {
@@ -237,6 +241,7 @@ impl Status {
             Self::MethodNotAllowed => "405 Method Not Allowed",
             Self::TooLarge => "413 Content Too Large",
             Self::UnsupportedMedia => "415 Unsupported Media Type",
+            Self::Busy => "503 Service Unavailable",
         }
     }
 
@@ -254,14 +259,21 @@ async fn handle(
     access: &Access,
     broker: &Broker,
     timer: &Timer,
+    ingress: &AtomicUsize,
 ) -> io::Result<()> {
-    let request = deadline(read_request(stream, access), timer, CLIENT_IO_TIMEOUT).await??;
-    let rejected = matches!(&request, Request::Reply(_));
+    let request = deadline(
+        read_request(stream, access, ingress),
+        timer,
+        CLIENT_IO_TIMEOUT,
+    )
+    .await?;
+    let rejected = matches!(&request, Err(ReadError::Http(_)));
     let (status, body) = match request {
-        Request::Reply(status) => (status, None),
-        Request::Post(request) => {
-            let message = serde_json::from_slice(&request);
-            drop(request);
+        Err(ReadError::Io(error)) => return Err(error),
+        Err(ReadError::Http(status)) => (status, None),
+        Ok(frame) => {
+            let message = serde_json::from_slice(&frame.bytes);
+            drop(frame);
             match respond(broker, message).await? {
                 Some(reply) => (Status::Ok, Some(reply)),
                 None => (Status::Accepted, None),
@@ -298,66 +310,135 @@ async fn drain_rejected(stream: &mut Stream) -> io::Result<()> {
     Ok(())
 }
 
-struct Headers {
-    bytes: Vec<u8>,
-    first_body: usize,
+#[derive(Debug)]
+enum ReadError {
+    Io(io::Error),
+    Http(Status),
 }
 
-async fn read_headers(stream: &mut Stream) -> io::Result<Result<Headers, Status>> {
-    let mut bytes = Vec::new();
-    loop {
-        let start = bytes.len().saturating_sub(3);
-        let count = stream.read_append(&mut bytes, 2_048).await?;
-        if count == 0 {
-            return Ok(Err(Status::BadRequest));
+impl From<io::Error> for ReadError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<Status> for ReadError {
+    fn from(status: Status) -> Self {
+        Self::Http(status)
+    }
+}
+
+struct Frame<'a> {
+    bytes: Vec<u8>,
+    ingress: Option<&'a AtomicUsize>,
+    reserved: usize,
+}
+
+impl<'a> Frame<'a> {
+    fn new(ingress: Option<&'a AtomicUsize>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ingress,
+            reserved: 0,
         }
-        if let Some(offset) = bytes[start..]
+    }
+
+    async fn read(&mut self, stream: &mut Stream, limit: usize) -> Result<usize, ReadError> {
+        stream.read_chunk(limit, |bytes| self.append(bytes)).await?
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<usize, ReadError> {
+        let required = self.bytes.len() + bytes.len();
+        if required > MAX_REQUEST_BUFFER {
+            return Err(Status::TooLarge.into());
+        }
+        if required > self.bytes.capacity() {
+            let capacity = required.next_power_of_two().min(MAX_REQUEST_BUFFER);
+            self.charge(capacity)?;
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(io::Error::other)?;
+            // An allocator may return spare capacity. Charge for that too.
+            self.charge(self.bytes.capacity())?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn charge(&mut self, capacity: usize) -> Result<(), Status> {
+        if let Some(used) = self.ingress
+            && capacity > self.reserved
+        {
+            let growth = capacity - self.reserved;
+            used.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (growth <= MAX_BUFFERED_REQUESTS - current).then_some(current + growth)
+            })
+            .map_err(|_| Status::Busy)?;
+            self.reserved = capacity;
+        }
+        Ok(())
+    }
+
+    fn discard_prefix(&mut self, offset: usize) {
+        self.bytes.copy_within(offset.., 0);
+        self.bytes.truncate(self.bytes.len() - offset);
+    }
+}
+
+impl Drop for Frame<'_> {
+    fn drop(&mut self) {
+        if let Some(used) = self.ingress {
+            // Release the buffer before another worker can use its budget.
+            drop(std::mem::take(&mut self.bytes));
+            used.fetch_sub(self.reserved, Ordering::Relaxed);
+        }
+    }
+}
+
+async fn read_headers(stream: &mut Stream, frame: &mut Frame<'_>) -> Result<usize, ReadError> {
+    loop {
+        let start = frame.bytes.len().saturating_sub(3);
+        let remaining = MAX_HEADERS - frame.bytes.len();
+        if frame.read(stream, remaining).await? == 0 {
+            return Err(Status::BadRequest.into());
+        }
+        if let Some(offset) = frame.bytes[start..]
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
         {
-            let first_body = start + offset + 4;
-            if first_body > MAX_HEADERS {
-                return Ok(Err(Status::TooLarge));
-            }
-            return Ok(Ok(Headers { bytes, first_body }));
+            return Ok(start + offset + 4);
         }
-        if bytes.len() >= MAX_HEADERS {
-            return Ok(Err(Status::TooLarge));
+        if frame.bytes.len() == MAX_HEADERS {
+            return Err(Status::TooLarge.into());
         }
     }
 }
 
-async fn read_request(stream: &mut Stream, access: &Access) -> io::Result<Request> {
-    let Headers {
-        mut bytes,
-        first_body,
-    } = match read_headers(stream).await? {
-        Ok(headers) => headers,
-        Err(status) => return Ok(Request::Reply(status)),
-    };
-    let framing = match parse_headers(&bytes[..first_body], access) {
-        Ok(framing) => framing,
-        Err(status) => return Ok(Request::Reply(status)),
-    };
-    let length = match framing {
-        Framing::Length(length) => length,
-        Framing::Chunked => return read_chunked(stream, bytes.split_off(first_body)).await,
-    };
-    let total = first_body + length;
-    // A connection carries one request. Refuse extra bytes already received.
-    if bytes.len() > total {
-        return Ok(Request::Reply(Status::BadRequest));
-    }
-    let mut filled = bytes.len();
-    bytes.resize(total, 0);
-    while filled < total {
-        let count = stream.read(&mut bytes[filled..]).await?;
-        if count == 0 {
-            return Ok(Request::Reply(Status::BadRequest));
+async fn read_request<'a>(
+    stream: &mut Stream,
+    access: &Access,
+    ingress: &'a AtomicUsize,
+) -> Result<Frame<'a>, ReadError> {
+    let mut frame = Frame::new(Some(ingress));
+    let first_body = read_headers(stream, &mut frame).await?;
+    let framing = parse_headers(&frame.bytes[..first_body], access)?;
+    frame.discard_prefix(first_body);
+    match framing {
+        Framing::Length(length) => {
+            // A connection carries one request. Refuse extra bytes already received.
+            if frame.bytes.len() > length {
+                return Err(Status::BadRequest.into());
+            }
+            while frame.bytes.len() < length {
+                let remaining = length - frame.bytes.len();
+                if frame.read(stream, remaining).await? == 0 {
+                    return Err(Status::BadRequest.into());
+                }
+            }
         }
-        filled += count;
+        Framing::Chunked => read_chunked(stream, &mut frame).await?,
     }
-    Ok(Request::Post(bytes.split_off(first_body)))
+    Ok(frame)
 }
 
 enum Framing {
@@ -365,58 +446,52 @@ enum Framing {
     Chunked,
 }
 
-async fn read_chunked(stream: &mut Stream, mut wire: Vec<u8>) -> io::Result<Request> {
-    let mut body = Vec::new();
+async fn read_chunked(stream: &mut Stream, frame: &mut Frame<'_>) -> Result<(), ReadError> {
     let mut offset = 0;
+    let mut decoded = 0;
     loop {
-        let (header, amount) = match httparse::parse_chunk_size(&wire[offset..]) {
+        let (header, amount) = match httparse::parse_chunk_size(&frame.bytes[offset..]) {
             Ok(httparse::Status::Complete((header, size))) => {
-                let Ok(size) = usize::try_from(size) else {
-                    return Ok(Request::Reply(Status::TooLarge));
-                };
-                if size > MAX_MESSAGE - body.len() {
-                    return Ok(Request::Reply(Status::TooLarge));
+                if size > (MAX_MESSAGE - decoded) as u64 {
+                    return Err(Status::TooLarge.into());
                 }
-                (header, size)
+                (header, size as usize)
             }
             Ok(httparse::Status::Partial) => {
-                if !more_chunk_bytes(stream, &mut wire).await? {
-                    return Ok(Request::Reply(Status::BadRequest));
-                }
+                more_chunk_bytes(stream, frame).await?;
                 continue;
             }
-            Err(_) => return Ok(Request::Reply(Status::BadRequest)),
+            Err(_) => return Err(Status::BadRequest.into()),
         };
         offset += header;
         if amount == 0 {
             loop {
-                let remaining = &wire[offset..];
+                let remaining = &frame.bytes[offset..];
                 if remaining == b"\r\n" {
-                    return Ok(Request::Post(body));
+                    break;
                 }
                 if remaining.starts_with(b"\r\n") {
-                    return Ok(Request::Reply(Status::BadRequest));
+                    return Err(Status::BadRequest.into());
                 }
                 match has_complete_trailers(remaining) {
-                    Ok(true) => return Ok(Request::Post(body)),
-                    Ok(false) => {}
-                    Err(()) => return Ok(Request::Reply(Status::BadRequest)),
-                }
-                if !more_chunk_bytes(stream, &mut wire).await? {
-                    return Ok(Request::Reply(Status::BadRequest));
+                    Ok(true) => break,
+                    Ok(false) => more_chunk_bytes(stream, frame).await?,
+                    Err(()) => return Err(Status::BadRequest.into()),
                 }
             }
+            frame.bytes.truncate(decoded);
+            return Ok(());
         }
         let end = offset + amount;
-        while wire.len() < end + 2 {
-            if !more_chunk_bytes(stream, &mut wire).await? {
-                return Ok(Request::Reply(Status::BadRequest));
-            }
+        while frame.bytes.len() < end + 2 {
+            more_chunk_bytes(stream, frame).await?;
         }
-        if &wire[end..end + 2] != b"\r\n" {
-            return Ok(Request::Reply(Status::BadRequest));
+        if &frame.bytes[end..end + 2] != b"\r\n" {
+            return Err(Status::BadRequest.into());
         }
-        body.extend_from_slice(&wire[offset..end]);
+        // The decoded prefix is always behind the framing cursor.
+        frame.bytes.copy_within(offset..end, decoded);
+        decoded += amount;
         offset = end + 2;
     }
 }
@@ -430,9 +505,12 @@ fn has_complete_trailers(bytes: &[u8]) -> Result<bool, ()> {
     }
 }
 
-async fn more_chunk_bytes(stream: &mut Stream, wire: &mut Vec<u8>) -> io::Result<bool> {
-    let available = MAX_MESSAGE + MAX_HEADERS - wire.len();
-    Ok(stream.read_append(wire, available).await? != 0)
+async fn more_chunk_bytes(stream: &mut Stream, frame: &mut Frame<'_>) -> Result<(), ReadError> {
+    let remaining = MAX_REQUEST_BUFFER - frame.bytes.len();
+    if frame.read(stream, remaining).await? == 0 {
+        return Err(Status::BadRequest.into());
+    }
+    Ok(())
 }
 
 fn parse_headers(bytes: &[u8], access: &Access) -> Result<Framing, Status> {
@@ -631,12 +709,24 @@ pub(super) async fn post(
         CLIENT_IO_TIMEOUT,
     )
     .await??;
-    let Headers {
-        mut bytes,
-        first_body,
-    } = deadline(read_headers(&mut stream), timer, Duration::from_secs(7_200))
-        .await??
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid MCP response headers"))?;
+    let mut response_frame = Frame::new(None);
+    let first_body = match deadline(
+        read_headers(&mut stream, &mut response_frame),
+        timer,
+        Duration::from_secs(7_200),
+    )
+    .await?
+    {
+        Ok(start) => start,
+        Err(ReadError::Io(error)) => return Err(error),
+        Err(ReadError::Http(_)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid MCP response headers",
+            ));
+        }
+    };
+    let mut bytes = std::mem::take(&mut response_frame.bytes);
     let length = {
         let mut headers = [httparse::EMPTY_HEADER; 32];
         let mut response = httparse::Response::new(&mut headers);
@@ -710,4 +800,30 @@ pub(super) async fn post(
         CLIENT_IO_TIMEOUT,
     )
     .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_budget_counts_capacity_and_releases_on_drop() {
+        const OCCUPIED: usize = MAX_BUFFERED_REQUESTS - 6;
+        let used = AtomicUsize::new(OCCUPIED);
+        let mut first = Frame::new(Some(&used));
+        assert_eq!(first.append(b"abc").unwrap(), 3);
+        assert_eq!(used.load(Ordering::Relaxed), OCCUPIED + 4);
+
+        let mut second = Frame::new(Some(&used));
+        assert!(matches!(
+            second.append(b"xyz"),
+            Err(ReadError::Http(Status::Busy))
+        ));
+        assert_eq!(second.bytes.capacity(), 0);
+        drop(first);
+        assert_eq!(second.append(b"xyz").unwrap(), 3);
+        assert_eq!(used.load(Ordering::Relaxed), OCCUPIED + 4);
+        drop(second);
+        assert_eq!(used.load(Ordering::Relaxed), OCCUPIED);
+    }
 }

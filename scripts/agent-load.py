@@ -202,6 +202,55 @@ async def slow_output(path, pid, agents):
         "verified_response_bytes": sum(lengths),
     }
 
+
+async def slow_input(path, pid, agents):
+    directory = Path(f"/proc/{pid}/fd")
+    idle_fds = len(list(directory.iterdir()))
+    idle_rss = process_sample(pid)[0]
+    body_size = 256 * 1024
+    headers = (
+        "POST /mcp HTTP/1.1\r\nHost: zrun\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {body_size}\r\n\r\n"
+    ).encode()
+    clients = []
+
+    async def open_client():
+        reader, writer = await asyncio.open_unix_connection(path)
+        clients.append((reader, writer))
+        writer.write(headers)
+        await writer.drain()
+
+    try:
+        await asyncio.gather(*(open_client() for _ in range(agents)))
+        while (held_fds := len(list(directory.iterdir()))) < idle_fds + agents:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        held_rss, threads, children = process_sample(pid)
+        # Confirm the stalled connections can finish with exactly the advertised body.
+        verified = min(8, agents)
+        for index, (reader, writer) in enumerate(clients[:verified]):
+            body = json.dumps({"jsonrpc": "2.0", "id": index, "method": "ping"}).encode()
+            writer.write(body.ljust(body_size, b" "))
+            await writer.drain()
+            reply = json.loads(await reader.readexactly(await response_length(reader)))
+            assert reply == {"jsonrpc": "2.0", "id": index, "result": {}}, reply
+    finally:
+        for _, writer in clients:
+            writer.close()
+        await asyncio.gather(*(writer.wait_closed() for _, writer in clients))
+    assert children == 0
+    return {
+        "mode": "slow-input",
+        "agents": agents,
+        "advertised_body_bytes": body_size,
+        "verified_responses": verified,
+        "idle_rss_kib": idle_rss,
+        "held_rss_kib": held_rss,
+        "held_fds": held_fds,
+        "held_threads": threads,
+        "held_children": children,
+    }
+
 def run(binary, agents, mode, workers):
     with tempfile.TemporaryDirectory(prefix="zrun-load-") as directory:
         path = Path(directory) / "run.sock"
@@ -220,8 +269,9 @@ def run(binary, agents, mode, workers):
                     raise TimeoutError("zrun daemon did not announce readiness")
                 announced = process.stderr.readline()
             assert announced.strip() == f"zrun: unix:{path}".encode(), announced
-            if mode == "slow-output":
-                return asyncio.run(asyncio.wait_for(slow_output(path, process.pid, agents), timeout=60))
+            if mode in ("slow-input", "slow-output"):
+                stalled = slow_input if mode == "slow-input" else slow_output
+                return asyncio.run(asyncio.wait_for(stalled(path, process.pid, agents), timeout=60))
             return asyncio.run(load(path, process.pid, agents, mode))
         finally:
             process.terminate()
@@ -234,17 +284,21 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--agents", type=int, default=1_000)
     parser.add_argument("--rounds", type=int, default=5)
-    parser.add_argument("--slow-output-baseline", type=Path, help="compare cached large output with this baseline daemon")
+    comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--slow-input-baseline", type=Path, help="compare partial request memory with this baseline daemon")
+    comparisons.add_argument("--slow-output-baseline", type=Path, help="compare cached large output with this baseline daemon")
     parser.add_argument("--workers", type=int, choices=range(1,17), default=1)
     args = parser.parse_args()
     if not 1 <= args.agents <= 2_000 or args.rounds < 1:
         parser.error("agents must be 1..2000 and rounds must be positive")
-    if args.slow_output_baseline:
-        order = [("candidate", args.binary), ("baseline", args.slow_output_baseline)]
+    baseline = args.slow_input_baseline or args.slow_output_baseline
+    if baseline:
+        mode = "slow-input" if args.slow_input_baseline else "slow-output"
+        order = [("candidate", args.binary), ("baseline", baseline)]
         for round_number in range(args.rounds):
             binaries = order if round_number % 2 == 0 else reversed(order)
             for version, binary in binaries:
-                sample = run(binary.resolve(), args.agents, "slow-output", args.workers)
+                sample = run(binary.resolve(), args.agents, mode, args.workers)
                 print(json.dumps({"round": round_number + 1, "version": version,
                                   "workers": args.workers, **sample}), flush=True)
         return

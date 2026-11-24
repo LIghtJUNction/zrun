@@ -297,16 +297,34 @@ impl Stream {
     ///
     /// Returns an OS or reactor shutdown error.
     pub async fn read_append(&mut self, output: &mut Vec<u8>, limit: usize) -> io::Result<usize> {
+        self.read_chunk(limit, |bytes| {
+            output.extend_from_slice(bytes);
+            bytes.len()
+        })
+        .await
+    }
+
+    /// Read up to 2 KiB and pass the bytes to a callback.
+    ///
+    /// The scratch buffer exists only during the poll that reads from the
+    /// socket. An empty slice indicates end of stream or a zero limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS or reactor shutdown error.
+    pub async fn read_chunk<T>(
+        &mut self,
+        limit: usize,
+        mut consume: impl FnMut(&[u8]) -> T,
+    ) -> io::Result<T> {
         if limit == 0 {
-            return Ok(0);
+            return Ok(consume(&[]));
         }
         self.0
             .ready(Direction::Read, |socket| {
-                const CHUNK: usize = 2048;
-                let mut scratch = [0; CHUNK];
-                let count = socket.read(&mut scratch[..limit.min(CHUNK)])?;
-                output.extend_from_slice(&scratch[..count]);
-                Ok(count)
+                let mut scratch = [0; 2048];
+                let count = socket.read(&mut scratch[..limit.min(2048)])?;
+                Ok(consume(&scratch[..count]))
             })
             .await
     }
