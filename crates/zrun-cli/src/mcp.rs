@@ -435,10 +435,10 @@ fn encode_remote_batch(
             request
         })
         .collect();
+    let mut payload = RemotePayload::default();
     loop {
-        let bytes = remote_payload(offset, &requests[..count])?;
-        if bytes.len() <= MAX_MESSAGE {
-            return Ok((bytes, count));
+        if payload.encode(offset, &requests[..count])? {
+            return Ok((payload.bytes, count));
         }
         if count == 1 {
             return Err(io::Error::new(
@@ -469,16 +469,56 @@ struct RemoteCommands<'a> {
     commands: &'a [Request],
 }
 
-fn remote_payload(id: usize, commands: &[Request]) -> io::Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&RemoteCall {
-        jsonrpc: "2.0",
-        id,
-        method: "tools/call",
-        params: RemoteParams {
-            name: "shell_batch",
-            arguments: RemoteCommands { commands },
-        },
-    })?)
+#[derive(Default)]
+struct RemotePayload {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl RemotePayload {
+    fn encode(&mut self, id: usize, commands: &[Request]) -> io::Result<bool> {
+        self.bytes.clear();
+        self.exceeded = false;
+        let encoded = serde_json::to_writer(
+            &mut *self,
+            &RemoteCall {
+                jsonrpc: "2.0",
+                id,
+                method: "tools/call",
+                params: RemoteParams {
+                    name: "shell_batch",
+                    arguments: RemoteCommands { commands },
+                },
+            },
+        );
+        if self.exceeded {
+            return Ok(false);
+        }
+        encoded?;
+        Ok(true)
+    }
+}
+
+impl Write for RemotePayload {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_MESSAGE - self.bytes.len() {
+            self.exceeded = true;
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        // Cap reserved capacity as well as initialized length, even when
+        // a large write is followed by a small one near the wire limit.
+        let needed = self.bytes.len() + bytes.len();
+        if needed > self.bytes.capacity() {
+            let capacity = needed.next_power_of_two().max(128);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -572,5 +612,33 @@ impl RemotePool {
             }
         }
         Ok(records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_encoding_stops_at_the_wire_limit_and_reuses_its_buffer() {
+        let mut payload = RemotePayload::default();
+        payload.write_all(&vec![0; MAX_MESSAGE - 2]).unwrap();
+        payload.write_all(b"ab").unwrap();
+        assert!(payload.write_all(b"c").is_err());
+        assert_eq!(payload.bytes.len(), MAX_MESSAGE);
+        assert!(payload.bytes.capacity() <= MAX_MESSAGE);
+
+        let requests = vec![Request::new("#".repeat(20_000)); MAX_BATCH_COMMANDS];
+        assert!(!payload.encode(0, &requests).unwrap());
+        assert!(payload.bytes.len() <= MAX_MESSAGE);
+        assert!(payload.encode(0, &requests[..8]).unwrap());
+        let response: Value = serde_json::from_slice(&payload.bytes).unwrap();
+        assert_eq!(
+            response["params"]["arguments"]["commands"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
     }
 }
