@@ -82,3 +82,7 @@
 | 固定客户端，仅替换 broker | 227.53 ms | 226.39 ms | 0.995 [0.951, 1.052] |
 
 原始数据位于 `dist/zrun-shared-timeout-load.jsonl`，SHA256 `652c8b060050230ed53753176f2f6dea8c85c26778748b5fa137082db4e4846c`。
+
+## 本地脚本的批量提交
+
+4 worker，固定 CPU 0–15，比较 `def172b` 的逐条提交与连续 `async` 分组。每个进程运行 32 组、每组 128 个同键任务，组后 `await *`，逐字节验证 4,096 个输出并确认只有一次实际执行。20 对 release 进程均通过。中位耗时从 10.23 ms 到 10.33 ms，比值 1.010 [0.943, 1.066]，未检出稳定变化。原始样本位于 `dist/zrun-local-async-batch-results.jsonl`。

@@ -162,46 +162,64 @@ pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result
         let spawner = runtime.spawner();
         let io = runtime.io().clone();
         let timer = runtime.timer();
-        runtime.block_on(execute(steps, async |mut request: Request| {
-            request.cwd = Some(
-                request
-                    .cwd
-                    .as_deref()
-                    .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
-            );
-            let (sender, receiver) = zrun::sync::channel();
-            let (io, path, timer) = (io.clone(), path.clone(), timer.clone());
-            spawner
-                .spawn(async move {
-                    let delivery = crate::mcp::remote_one(&io, &path, request, &timer)
-                        .await
-                        .unwrap_or_else(Delivery::rejected);
-                    let _ = sender.send(delivery);
+        runtime.block_on(execute(steps, async |requests: Vec<Request>| {
+            requests
+                .into_iter()
+                .map(|mut request| {
+                    request.cwd = Some(
+                        request
+                            .cwd
+                            .as_deref()
+                            .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
+                    );
+                    let (sender, receiver) = zrun::sync::channel();
+                    let (io, path, timer) = (io.clone(), path.clone(), timer.clone());
+                    spawner
+                        .spawn(async move {
+                            let delivery = crate::mcp::remote_one(&io, &path, request, &timer)
+                                .await
+                                .unwrap_or_else(Delivery::rejected);
+                            let _ = sender.send(delivery);
+                        })
+                        .map_err(io::Error::other)?;
+                    Ok(Ticket::Pending(receiver))
                 })
-                .map_err(io::Error::other)?;
-            Ok(Ticket::Pending(receiver))
+                .collect()
         }))?
     } else {
         Batch::new(shell)?.drive(async move |broker| {
-            execute(steps, async |request| broker.submit(request).await).await
+            execute(steps, async |requests| broker.submit_batch(requests).await).await
         })
     }
 }
 
 async fn execute(
     steps: Vec<Step>,
-    mut submit: impl AsyncFnMut(Request) -> io::Result<Ticket>,
+    mut submit: impl AsyncFnMut(Vec<Request>) -> Vec<io::Result<Ticket>>,
 ) -> io::Result<u8> {
     let mut pending = std::collections::BTreeMap::new();
     let mut status = 0;
-    for step in steps {
+    let mut steps = steps.into_iter().peekable();
+    while let Some(step) = steps.next() {
         let delivery = match step {
             Step::Spawn(name, request) => {
-                pending.insert(name, submit(request).await);
+                let mut names = vec![name];
+                let mut requests = vec![request];
+                while let Some(Step::Spawn(name, request)) =
+                    steps.next_if(|step| matches!(step, Step::Spawn(..)))
+                {
+                    names.push(name);
+                    requests.push(request);
+                }
+                let tickets = submit(requests).await;
+                pending.extend(names.into_iter().zip(tickets));
                 continue;
             }
             Step::Await(name) => pending.remove(&name).expect("validated await"),
-            Step::Shell(request) => submit(request).await,
+            Step::Shell(request) => submit(vec![request])
+                .await
+                .pop()
+                .expect("one ticket for one request"),
         };
         let delivery = match delivery {
             Ok(ticket) => match ticket.await {
