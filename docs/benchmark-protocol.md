@@ -13,6 +13,7 @@ Table 1. Work performed and the boundary of each measurement.
 | Scenario | Timed or observed work | Interpretation |
 | --- | --- | --- |
 | `spawn_join` | Allocate the handle vector, spawn N tasks returning their index, then await every handle and verify its exact index. | End-to-end spawn and join throughput, including handle management. |
+| `batch_join` | Submit one iterator of N Futures using `Pool::spawn_batch` on zrun and one `Runtime::spawn` per Future on Tokio. Both use their multi-thread runtime, even at one worker. Each Future self-wakes K times and returns its index. | Optional end-to-end batch throughput. Raw samples also record submission time through obtaining all handles. |
 | `yield` | Pre-spawn N identical Futures. Each self-wakes and returns Pending K times, then returns its index. Time `block_on` through all joins. | N × K wake operations per second. Final polls and join bookkeeping are included. `yield_ns_per_op` is a wall-time proxy, not isolated CPU scheduling overhead. |
 | `wake_latency` | Pre-spawn N Futures. First poll records time for a deterministic evenly spaced subset, self-wakes, and returns Pending. Second poll records elapsed time. Join every task. | Self-wake to next-poll latency under this workload. It does not measure an external producer wake, timer, socket readiness, or TCP latency. |
 | `external_wake_latency` | Pre-spawn N Futures. Each sends its Waker to a dedicated producer thread during its initial poll. After all registrations arrive, the producer wakes each task once. A deterministic subset records time immediately before notification and again at resumption. | Cross-thread notification-to-poll latency under a burst, including queueing and worker handoff. |
@@ -36,6 +37,8 @@ python3 scripts/benchmark.py \
   --workers 1 2 4 8 16 \
   --rounds 10
 ```
+
+To run the optional batch workload, set `--scenarios batch_join` and use `--yields 0` for immediately ready tasks or `--yields 16` for self-waking tasks. It is available in both `benchmark.py` and `compare_revisions.py` and is excluded from their default matrices. Each run verifies the returned value of every task and the final active count.
 
 The output directory must not already exist. Windows uses `python` and `target/release/zrun-bench.exe`; choose a writable output path for that machine. The runner requires Python 3.11 or later and only its standard library. It does not invoke Cargo, install dependencies, change CPU governors, or run the soak workload.
 
@@ -68,6 +71,7 @@ Table 2. P0 ratio directions and targets inherited from the design.
 
 | Metric and unit | Better direction | Normal target | Challenge target |
 | --- | --- | --- | --- |
+| `batch_join_ops_per_sec`, tasks/s (optional) | Higher | ≥ 1.20 | ≥ 2.00 |
 | `spawn_join_ops_per_sec`, tasks/s | Higher | ≥ 1.20 | ≥ 2.00 |
 | `wake_ops_per_sec`, wakes/s | Higher | ≥ 1.20 | ≥ 2.00 |
 | `yield_cpu_ns_per_wake`, CPU ns/wake | Lower | ≤ 0.85 | ≤ 0.50 |

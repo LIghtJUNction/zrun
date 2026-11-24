@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--tasks", type=int, nargs="+", choices=bench.TASK_SCALES,
                         default=list(bench.TASK_SCALES))
     parser.add_argument("--scenarios", nargs="+", choices=bench.SCENARIOS,
-                        default=list(bench.SCENARIOS))
+                        default=list(bench.DEFAULT_SCENARIOS))
     parser.add_argument("--workers", type=int, choices=bench.WORKERS, default=1)
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--yields", type=int, default=16)
@@ -91,8 +91,8 @@ def main():
         parser.error("rounds must be 1..1000 and bootstrap 100..100000")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 86400:
         parser.error("timeout must be finite and in (0,86400]")
-    if not 1 <= args.yields <= 10000:
-        parser.error("yields must be 1..10000")
+    if not (0 if set(args.scenarios) == {"batch_join"} else 1) <= args.yields <= 10000:
+        parser.error("yields must be 1..10000, or zero for batch_join alone")
     args.tasks = list(dict.fromkeys(args.tasks))
     args.scenarios = list(dict.fromkeys(args.scenarios))
     args.latency_samples, args.hold_ms = 10000, 20

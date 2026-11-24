@@ -23,10 +23,12 @@ import time
 import tomllib
 import unittest
 
-SCENARIOS = ("spawn_join", "yield", "wake_latency", "external_wake_latency", "pending_memory", "idle")
+DEFAULT_SCENARIOS = ("spawn_join", "yield", "wake_latency", "external_wake_latency", "pending_memory", "idle")
+SCENARIOS = (*DEFAULT_SCENARIOS, "batch_join")
 TASK_SCALES = (1000, 10000, 100000, 1000000)
 WORKERS = (1, 2, 4, 8, 16)
 METRICS = {
+    "batch_join_ops_per_sec": ("batch_join", "higher", 1.20, 2.00, "tasks/s"),
     "spawn_join_ops_per_sec": ("spawn_join", "higher", 1.20, 2.00, "tasks/s"),
     "wake_ops_per_sec": ("yield", "higher", 1.20, 2.00, "wakes/s"),
     "yield_cpu_ns_per_wake": ("yield", "lower", 0.85, 0.50, "CPU ns/wake"),
@@ -281,12 +283,22 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     for key, expected in {"yields": yields, "latency_samples": latency_samples, "hold_ms": hold_ms}.items():
         if config.get(key) != expected:
             return f"configuration mismatch: {key}"
-    if scenario in ("spawn_join", "yield", "wake_latency", "external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
+    if scenario in ("spawn_join", "batch_join", "yield", "wake_latency", "external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
         return "checksum mismatch"
     if scenario == "pending_memory" and (raw.get("pending_polled_tasks") != tasks or raw.get("cancelled_tasks") != tasks):
         return "pending task accounting mismatch"
     if not isinstance(raw.get("metrics"), dict):
         return "missing metrics object"
+    if scenario == "batch_join":
+        metrics = raw["metrics"]
+        elapsed = metrics.get("elapsed_ns")
+        submission = metrics.get("submission_ns")
+        throughput = metrics.get("batch_join_ops_per_sec")
+        if (not finite_number(elapsed) or elapsed <= 0
+            or not finite_number(submission) or not 0 < submission <= elapsed
+            or not finite_number(throughput)
+            or not math.isclose(throughput, tasks * 1e9 / elapsed, rel_tol=1e-12)):
+            return "invalid batch submission/completion timing"
     if scenario == "yield":
         metrics = raw["metrics"]
         cpu = metrics.get("yield_process_cpu_ns")
@@ -416,7 +428,7 @@ def main():
     parser.add_argument("--output", type=Path, help="new directory for raw data and report; use a path outside Git")
     parser.add_argument("--tasks", type=int, nargs="+", choices=TASK_SCALES, default=[1000])
     parser.add_argument("--workers", type=int, nargs="+", choices=WORKERS, default=[1])
-    parser.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
+    parser.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(DEFAULT_SCENARIOS))
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--bootstrap", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20261123)
@@ -433,7 +445,7 @@ def main():
         parser.error("--binary and --output are required")
     if not 1 <= args.rounds <= 1000 or not 100 <= args.bootstrap <= 100000:
         parser.error("rounds must be 1..1000 and bootstrap 100..100000")
-    if not 1 <= args.yields <= 10000 or not 1 <= args.latency_samples <= 100000 or not 0 <= args.hold_ms <= 10000:
+    if not (0 if set(args.scenarios) == {"batch_join"} else 1) <= args.yields <= 10000 or not 1 <= args.latency_samples <= 100000 or not 0 <= args.hold_ms <= 10000:
         parser.error("scenario arguments outside supported bounds")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 86400:
         parser.error("timeout must be finite and in (0,86400]")

@@ -43,7 +43,7 @@ impl Config {
         while let Some(key) = args.next() {
             if key == "--help" {
                 println!(
-                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|batch_join|yield|wake_latency|external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
                 );
                 std::process::exit(0);
             }
@@ -74,6 +74,7 @@ impl Config {
         }
         if ![
             "spawn_join",
+            "batch_join",
             "yield",
             "wake_latency",
             "external_wake_latency",
@@ -87,7 +88,8 @@ impl Config {
         }
         if !(1..=1_000_000).contains(&c.tasks)
             || ![1, 2, 4, 8, 16].contains(&c.workers)
-            || !(1..=10_000).contains(&c.yields)
+            || c.yields > 10_000
+            || (c.yields == 0 && c.scenario != "batch_join")
             || !(1..=100_000).contains(&c.latency_samples)
             || c.hold_ms > 10_000
             || !(1..=60_000).contains(&c.sample_interval_ms)
@@ -169,6 +171,19 @@ trait Engine: Sized {
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static;
+    fn spawn_batch<F>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Result<Vec<Self::Handle<F::Output>>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        futures
+            .into_iter()
+            .map(|future| self.spawn(future))
+            .collect()
+    }
     fn block_on<F: Future>(&mut self, future: F) -> F::Output;
     fn alive(&self) -> usize;
 }
@@ -211,6 +226,19 @@ impl Engine for zrun::Pool {
     {
         self.spawn(f).map(ZrunJoin).map_err(|e| e.to_string())
     }
+    fn spawn_batch<F>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Result<Vec<Self::Handle<F::Output>>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn_batch(futures)
+            .into_iter()
+            .map(|result| result.map(ZrunJoin).map_err(|error| error.to_string()))
+            .collect()
+    }
     fn block_on<F: Future>(&mut self, f: F) -> F::Output {
         self.block_on(f)
     }
@@ -225,7 +253,7 @@ impl Engine for tokio::runtime::Runtime {
     where
         T: Send + 'static;
     fn new(config: &Config) -> Result<Self, String> {
-        let mut builder = if config.workers == 1 {
+        let mut builder = if config.workers == 1 && config.scenario != "batch_join" {
             tokio::runtime::Builder::new_current_thread()
         } else {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -608,6 +636,18 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
             let ns = started.elapsed().as_nanos().max(1) as u64;
             metrics = json!({"elapsed_ns": ns, "spawn_join_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64});
         }
+        "batch_join" => {
+            let started = Instant::now();
+            let handles = rt.spawn_batch((0..c.tasks).map(|index| YieldWork {
+                remaining: c.yields,
+                index,
+            }))?;
+            let submission_ns = started.elapsed().as_nanos().max(1) as u64;
+            checksum = rt.block_on(join_indices(handles))?;
+            let ns = started.elapsed().as_nanos().max(1) as u64;
+            metrics = json!({"elapsed_ns": ns, "submission_ns": submission_ns,
+                "batch_join_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64});
+        }
         "yield" => {
             let ready_start = Instant::now();
             let ready_cpu_start = (c.workers != 1).then(process_cpu_time).flatten();
@@ -737,7 +777,7 @@ fn main() {
         }
     };
     let result = match (c.engine.as_str(), c.workers) {
-        ("zrun", 1) => run::<zrun::Runtime>(&c),
+        ("zrun", 1) if c.scenario != "batch_join" => run::<zrun::Runtime>(&c),
         ("zrun", _) => run::<zrun::Pool>(&c),
         _ => run::<tokio::runtime::Runtime>(&c),
     };
