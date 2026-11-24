@@ -313,6 +313,29 @@ fn local_batch_delivers_each_result_without_waiting_for_the_next_command() {
 }
 
 #[test]
+fn remote_batch_rejects_late_wire_oversize_before_starting_any_command() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let input = format!(
+        "{}{}\n",
+        format!("{}\n", json!({"script":"touch executed"})).repeat(16),
+        json!({"script":"\u{1}".repeat(65_536)})
+    );
+    let mut client = zrun();
+    client
+        .arg("batch")
+        .current_dir(&directory.0)
+        .env("ZRUN_SOCKET", &socket);
+    let output = process_input(client, &input);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("encoded request exceeds"));
+    assert!(!directory.0.join("executed").exists());
+}
+
+#[test]
 fn remote_batch_window_overlaps_requests_and_preserves_output_order() {
     let directory = Directory::new();
     let socket = directory.0.join("zrun.sock");

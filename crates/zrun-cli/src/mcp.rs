@@ -356,6 +356,18 @@ pub(crate) fn run_remote(
                 )
             })?,
     };
+    // Validate wire sizes for the entire input before a broker can observe
+    // any command. Release each request as soon as its payload owns the data.
+    let mut requests = requests.into_iter();
+    let mut offset = 0;
+    let mut batches = Vec::new();
+    while requests.len() != 0 {
+        let (payload, count) = encode_remote_batch(offset, requests.as_slice())?;
+        batches.push((offset, count, payload));
+        requests.nth(count - 1);
+        offset += count;
+    }
+    let mut batches = batches.into_iter();
     let mut runtime = Executor::current()?;
     let io = runtime.io().clone();
     let timer = runtime.timer();
@@ -363,12 +375,12 @@ pub(crate) fn run_remote(
     let pool = std::sync::Arc::new(RemotePool::default());
     let path = std::sync::Arc::new(path);
     runtime.block_on(async {
-        let mut offset = 0;
         let mut active = std::collections::VecDeque::with_capacity(window);
-        while offset < requests.len() || !active.is_empty() {
-            while active.len() < window && offset < requests.len() {
-                let (payload, count) = encode_remote_batch(offset, &requests[offset..])?;
-                let id = offset;
+        while batches.len() != 0 || !active.is_empty() {
+            while active.len() < window {
+                let Some((id, count, payload)) = batches.next() else {
+                    break;
+                };
                 let (pool, io, path, timer) =
                     (pool.clone(), io.clone(), path.clone(), timer.clone());
                 let job = spawner
@@ -377,7 +389,6 @@ pub(crate) fn run_remote(
                     )
                     .map_err(io::Error::other)?;
                 active.push_back((id, job));
-                offset += count;
             }
             let (id, job) = active
                 .pop_front()
