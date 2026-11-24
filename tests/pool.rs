@@ -342,3 +342,74 @@ fn batch_iterator_panic_still_publishes_admitted_tasks() {
     received.sort_unstable();
     assert_eq!(received, [0, 1]);
 }
+
+#[test]
+fn cancellation_storm_reclaims_armed_timers_and_preserves_live_deadlines() {
+    const CANCELLED: usize = 4_096;
+    const LIVE: usize = 32;
+    for workers in [1, 4, 16] {
+        let mut pool = Pool::with_max_tasks(workers, CANCELLED + LIVE).unwrap();
+        let timer = pool.timer();
+        for wave in 0..4 {
+            let jobs: Vec<_> = pool
+                .spawn_batch((0..CANCELLED).map(|_| {
+                    let timer = timer.clone();
+                    async move { timer.sleep(Duration::from_secs(600)).await }
+                }))
+                .into_iter()
+                .map(Result::unwrap)
+                .collect();
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pool.stats().timer_entries != CANCELLED {
+                assert!(
+                    Instant::now() < deadline,
+                    "arming timers with {workers} workers, wave {wave}"
+                );
+                thread::yield_now();
+            }
+
+            let wait = Duration::from_millis(10);
+            let live = pool.spawn_batch((0..LIVE).map(|index| {
+                let timer = timer.clone();
+                async move {
+                    let started = Instant::now();
+                    timer.sleep(wait).await.unwrap();
+                    (index, started.elapsed())
+                }
+            }));
+            thread::scope(|scope| {
+                for shard in jobs.chunks(CANCELLED / 4) {
+                    scope.spawn(move || {
+                        for job in shard {
+                            job.abort();
+                        }
+                    });
+                }
+            });
+
+            pool.block_on(async {
+                for job in jobs {
+                    assert!(matches!(job.await, Err(JoinError::Cancelled)));
+                }
+                for (index, job) in live.into_iter().enumerate() {
+                    let (actual, slept) = job.unwrap().await.unwrap();
+                    assert_eq!(actual, index);
+                    assert!(slept >= wait);
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let stats = pool.stats();
+                if stats.active_tasks == 0 && stats.queued_tasks == 0 && stats.timer_entries == 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "draining pool with {workers} workers, wave {wave}: {stats:?}"
+                );
+                thread::yield_now();
+            }
+        }
+    }
+}
