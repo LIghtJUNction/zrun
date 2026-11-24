@@ -552,3 +552,32 @@ fn native_scripts_share_the_unix_broker_across_processes() {
     }
     assert_eq!(fs::read(directory.0.join("count")).unwrap(), b"x");
 }
+
+#[test]
+fn mcp_batch_authorizes_each_request_before_reuse() {
+    let directory = Directory::new();
+    let policy = directory.0.join("policy.json");
+    fs::write(&policy, br#"{"max_calls":2}"#).unwrap();
+    let request = rpc(
+        1,
+        "tools/call",
+        json!({"name":"shell_batch","arguments":{"commands":[reusable(), reusable(), reusable()]}}),
+    );
+    let mut command = zrun();
+    command.args(["mcp", "--stdio"]).env("ZRUN_POLICY", policy);
+    let response = process_input(command, &format!("{request}\n"));
+    let output = lines(&response);
+    let records = output[0]["result"]["structuredContent"]["commands"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["disposition"], "executed");
+    assert_eq!(records[1]["disposition"], "coalesced");
+    assert_eq!(records[2]["disposition"], "rejected");
+    assert!(
+        records[2]["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("CallLimit")
+    );
+}

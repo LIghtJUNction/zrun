@@ -284,10 +284,7 @@ async fn execute_call(
     commands: Vec<Request>,
     ingress: http::IngressCharge<'_>,
 ) -> Vec<Delivery> {
-    let mut tickets = Vec::with_capacity(commands.len());
-    for command in commands {
-        tickets.push(broker.submit(command).await);
-    }
+    let tickets = broker.submit_batch(commands).await;
     drop(ingress);
     let mut records = Vec::with_capacity(tickets.len());
     for ticket in tickets {

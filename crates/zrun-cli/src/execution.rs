@@ -420,54 +420,141 @@ impl Broker {
             .await
     }
 
-    pub(crate) async fn submit(&self, mut request: Request) -> io::Result<Receiver<Delivery>> {
+    fn authorize(&self, mut request: Request) -> io::Result<Request> {
         request.validate()?;
         let cwd = resolve_directory(&self.shared.directory, request.cwd.as_deref())?;
-        request.cwd = Some(cwd.clone());
+        request.cwd = Some(cwd);
         self.shared
             .gate
             .lock()
             .expect("command policy poisoned")
             .authorize(&self.shared.shell, &request)?;
+        Ok(request)
+    }
+
+    pub(crate) async fn submit(&self, request: Request) -> io::Result<Receiver<Delivery>> {
+        let request = self.authorize(request)?;
         if let Some(plugin) = &self.shared.plugin {
             plugin.authorize(&self.shared.shell, &request).await?;
         }
+        let submission = Submission::new(request);
+        let mut state = self.shared.state.lock().expect("broker state poisoned");
+        let previous = state.queue.len();
+        let ticket = state.enqueue(submission);
+        let idle = if state.queue.len() > previous {
+            state.sleeping.iter_mut().find_map(Option::take)
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(waker) = idle {
+            waker.wake();
+        }
+        ticket
+    }
+
+    pub(crate) async fn submit_batch(
+        &self,
+        requests: Vec<Request>,
+    ) -> Vec<io::Result<Receiver<Delivery>>> {
+        let mut results = Vec::with_capacity(requests.len());
+        if requests.len() == 1 || self.shared.plugin.is_some() {
+            for request in requests {
+                results.push(self.submit(request).await);
+            }
+            return results;
+        }
+
+        let mut requests = requests.into_iter();
+        loop {
+            // Authorize each request before admission, outside the queue lock.
+            // Limit the number of commands admitted in one critical section.
+            let prepared: Vec<_> = requests
+                .by_ref()
+                .take(8)
+                .map(|request| self.authorize(request).map(Submission::new))
+                .collect();
+            if prepared.is_empty() {
+                break;
+            }
+            let mut state = self.shared.state.lock().expect("broker state poisoned");
+            let previous = state.queue.len();
+            results.extend(
+                prepared
+                    .into_iter()
+                    .map(|result| result.and_then(|submission| state.enqueue(submission))),
+            );
+            let added = state.queue.len() - previous;
+            let idle: Vec<_> = state
+                .sleeping
+                .iter_mut()
+                .filter_map(Option::take)
+                .take(added)
+                .collect();
+            drop(state);
+            for waker in idle {
+                waker.wake();
+            }
+        }
+        results
+    }
+}
+
+struct Submission {
+    request: Request,
+    key: Option<Arc<Key>>,
+}
+
+impl Submission {
+    fn new(request: Request) -> Self {
         let key = request.reuse.as_ref().map(|reuse| {
             Arc::new(Key {
                 script: request.script.clone(),
-                cwd,
+                cwd: request
+                    .cwd
+                    .clone()
+                    .expect("authorized request has a directory"),
                 timeout_ms: request.timeout_ms,
                 reuse: reuse.clone(),
             })
         });
+        Self { request, key }
+    }
+}
+
+impl State {
+    fn enqueue(
+        &mut self,
+        Submission { request, key }: Submission,
+    ) -> io::Result<Receiver<Delivery>> {
         let (sender, receiver) = sync::channel();
-        let mut state = self.shared.state.lock().expect("broker state poisoned");
-        if let Some(delivery) = key.as_ref().and_then(|key| state.cache.get(key)) {
-            drop(state);
+        if let Some(delivery) = key.as_ref().and_then(|key| self.cache.get(key)) {
+            // This receiver has not been returned or polled.
+
             let _ = sender.send(Delivery {
                 disposition: Disposition::Cached,
                 result: delivery,
             });
             return Ok(receiver);
         }
-        if state.waiters == MAX_WAITERS {
+        if self.waiters == MAX_WAITERS {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "command queue is full",
             ));
         }
         if let Some(key) = &key
-            && let Some(subscribers) = state.in_flight.get_mut(key)
+            && let Some(subscribers) = self.in_flight.get_mut(key)
         {
             subscribers.push(Subscriber {
                 sender,
                 disposition: Disposition::Coalesced,
             });
-            state.waiters += 1;
+            self.waiters += 1;
             return Ok(receiver);
         }
         let size = request.size();
-        if size > MAX_PENDING_BYTES - state.pending_bytes {
+        if size > MAX_PENDING_BYTES - self.pending_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "command queue byte limit reached",
@@ -478,23 +565,18 @@ impl Broker {
             disposition: Disposition::Executed,
         };
         let completion = if let Some(key) = key {
-            state.in_flight.insert(key.clone(), vec![subscriber]);
+            self.in_flight.insert(key.clone(), vec![subscriber]);
             Completion::Shared(key)
         } else {
             Completion::Single(subscriber)
         };
-        state.waiters += 1;
-        state.pending_bytes += size;
-        state.queue.push_back(Job {
+        self.waiters += 1;
+        self.pending_bytes += size;
+        self.queue.push_back(Job {
             request,
             completion,
             size,
         });
-        let idle = state.sleeping.iter_mut().find_map(Option::take);
-        drop(state);
-        if let Some(waker) = idle {
-            waker.wake();
-        }
         Ok(receiver)
     }
 }
