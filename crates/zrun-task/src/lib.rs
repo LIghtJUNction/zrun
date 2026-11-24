@@ -1,9 +1,9 @@
 //! Task ownership, join results, cancellation, and the task RawWaker.
 //!
 //! Atomic scheduling state grants the unique poll or shutdown reservation.
-//! The future slot is locked only when ownership transfers. A poll owner
-//! retains the future across inline repolls and restores it before publishing
-//! Idle or Queued. User code and scheduler callbacks run outside the slot lock.
+//! A poll owner retains the future across inline repolls and restores it
+//! before publishing Idle or Queued. The slot uses the same reservation for
+//! safe access and synchronization of its contents.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 mod schedule;
+mod slot;
 
-use schedule::{Begin, Pending, ScheduleState};
+use slot::{Claim, FutureSlot, Suspend};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -184,8 +185,7 @@ type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub struct Task {
     id: u64,
     registry_index: AtomicUsize,
-    schedule: ScheduleState,
-    future: Mutex<Option<TaskFuture>>,
+    future: FutureSlot<TaskFuture>,
     scheduler: Weak<dyn Scheduler>,
     completion: Arc<dyn Completion>,
 }
@@ -213,8 +213,7 @@ impl Task {
         let task = Arc::new(Self {
             id,
             registry_index: AtomicUsize::new(usize::MAX),
-            schedule: ScheduleState::new(),
-            future: Mutex::new(Some(Box::pin(wrapped))),
+            future: FutureSlot::new(Box::pin(wrapped)),
             scheduler,
             completion: completion.clone(),
         });
@@ -245,7 +244,7 @@ impl Task {
     }
 
     fn schedule(self: &Arc<Self>) {
-        if self.schedule.wake() {
+        if self.future.wake() {
             self.enqueue();
         }
     }
@@ -257,7 +256,7 @@ impl Task {
     }
 
     fn request_abort(self: &Arc<Self>) {
-        if self.schedule.abort() {
+        if self.future.abort() {
             self.enqueue();
         }
     }
@@ -293,54 +292,48 @@ impl Task {
     }
 
     fn poll_budget(self: &Arc<Self>, mut inline_repolls: usize) -> bool {
-        let cancelled = match self.schedule.begin() {
-            Begin::Skip => return false,
-            Begin::Poll => None,
-            Begin::Cancel(reason) => Some(reason),
+        let mut owner = match self.future.begin() {
+            Claim::Skip => return false,
+            Claim::Poll(owner) => owner,
+            Claim::Cancel(future, reason) => {
+                self.finish_failure(future, reason.error());
+                return false;
+            }
         };
-        let mut future = lock(&self.future)
-            .take()
-            .expect("a runnable owns one future");
-
-        if let Some(reason) = cancelled {
-            self.finish_failure(future, reason.error());
-            return false;
-        }
 
         let waker = task_waker(self.clone());
         let mut cx = Context::from_waker(&waker);
         loop {
-            let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                owner.value_mut().as_mut().poll(&mut cx)
+            }));
             match result {
                 Ok(Poll::Pending) => {
-                    if inline_repolls != 0 && self.schedule.try_repoll() {
+                    if inline_repolls != 0 && owner.try_repoll() {
                         inline_repolls -= 1;
                         continue;
                     }
-                    let mut slot = lock(&self.future);
-                    *slot = Some(future);
-                    match self.schedule.pending() {
-                        Pending::Idle => return false,
-                        Pending::Requeue => return true,
-                        Pending::Cancel(reason) => {
-                            let future = slot.take().expect("poll owner returned its future");
-                            drop(slot);
+                    match owner.pending() {
+                        Suspend::Idle => return false,
+                        Suspend::Requeue => return true,
+                        Suspend::Cancel(future, reason) => {
                             self.finish_failure(future, reason.error());
                             return false;
                         }
                     }
                 }
                 Ok(Poll::Ready(())) => {
-                    self.schedule.complete();
                     // Success was published by the wrapper. A destructor panic
                     // cannot replace that already delivered result.
-                    let _ = drop_future(future);
+                    let _ = drop_future(owner.complete());
                     self.finished();
                     return false;
                 }
                 Err(payload) => {
-                    self.schedule.complete();
-                    self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
+                    self.finish_failure(
+                        owner.complete(),
+                        JoinError::Panicked(panic_message(payload)),
+                    );
                     return false;
                 }
             }
@@ -360,8 +353,7 @@ impl Task {
     /// Terminate an unpolled/idle task on the driver thread. A concurrent poll
     /// keeps its ownership and observes Shutdown when it next returns Pending.
     pub fn shutdown(&self) {
-        if let Some(reason) = self.schedule.shutdown() {
-            let future = lock(&self.future).take().expect("shutdown owns one future");
+        if let Some((future, reason)) = self.future.shutdown() {
             self.finish_failure(future, reason.error());
         }
     }
@@ -382,8 +374,8 @@ fn drop_future(future: TaskFuture) -> Result<(), Box<dyn Any + Send>> {
 }
 
 // Every data pointer represents one live strong Arc<Task>. Task is Send + Sync
-// through a mutex containing a Send future; scheduler/completion are Send +
-// Sync too. RawWaker operations therefore work from any waking thread.
+// through the synchronized slot containing a Send future and the Send + Sync
+// scheduler/completion. RawWaker operations work from any waking thread.
 //
 // into_raw creates the exact ownership consumed by wake/drop. clone creates a
 // further count for its returned RawWaker; wake_by_ref does not consume one.
@@ -394,7 +386,7 @@ impl Drop for Task {
     fn drop(&mut self) {
         // Executors explicitly resolve registered tasks. This path also closes
         // a task whose initial runnable was dropped before registration.
-        if !self.schedule.is_complete() {
+        if !self.future.is_complete() {
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 self.completion.fail(JoinError::Shutdown)
             }));
@@ -463,7 +455,7 @@ impl Future for YieldNow {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::schedule::CancelReason;
+    use crate::schedule::{Begin, CancelReason, Pending, ScheduleState};
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
