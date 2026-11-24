@@ -226,19 +226,48 @@ impl Drop for RegisteredSleep {
     }
 }
 
+enum Deadline {
+    Immediate,
+    At(Instant),
+    Overflow,
+}
+
 impl Timer {
+    /// Wait for a relative duration measured from this call.
     pub fn sleep(&self, duration: Duration) -> Sleep {
+        let deadline = if duration.is_zero() {
+            Deadline::Immediate
+        } else {
+            Instant::now()
+                .checked_add(duration)
+                .map_or(Deadline::Overflow, Deadline::At)
+        };
+        self.schedule(deadline)
+    }
+
+    /// Wait until an absolute monotonic deadline.
+    ///
+    /// A deadline that has already elapsed is immediately ready on an open
+    /// driver and does not use any timer capacity.
+    pub fn sleep_until(&self, deadline: Instant) -> Sleep {
+        self.schedule(if deadline <= Instant::now() {
+            Deadline::Immediate
+        } else {
+            Deadline::At(deadline)
+        })
+    }
+
+    fn schedule(&self, deadline: Deadline) -> Sleep {
         let Some(inner) = self.inner.upgrade() else {
             return Sleep::ready(Err(TimerError::Closed));
         };
-        let deadline = Instant::now().checked_add(duration);
         let admitted = {
             let mut state = lock(&inner.state);
             if state.closed {
                 Err(TimerError::Closed)
-            } else if duration.is_zero() {
+            } else if let Deadline::Immediate = deadline {
                 return Sleep::ready(Ok(()));
-            } else if let Some(deadline) = deadline {
+            } else if let Deadline::At(deadline) = deadline {
                 if state.entries.len() >= state.capacity {
                     Err(TimerError::CapacityExceeded {
                         capacity: state.capacity,
@@ -434,6 +463,27 @@ mod tests {
         drop(first);
         assert_eq!(notifications.load(Ordering::Relaxed), 4);
         assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn absolute_deadlines_share_capacity_and_expire_at_the_requested_time() {
+        let driver = driver(1);
+        let timer = driver.timer();
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(600);
+        let mut future = timer.sleep_until(deadline);
+        assert_eq!(driver.len(), 1);
+        assert_eq!(poll_sleep(&mut timer.sleep_until(now)), Poll::Ready(Ok(())));
+        assert_eq!(driver.len(), 1);
+        assert_eq!(driver.turn_at(deadline - Duration::from_nanos(1)), 0);
+        assert_eq!(driver.turn_at(deadline), 1);
+        assert_eq!(poll_sleep(&mut future), Poll::Ready(Ok(())));
+        assert!(driver.is_empty());
+        driver.shutdown();
+        assert_eq!(
+            poll_sleep(&mut timer.sleep_until(now)),
+            Poll::Ready(Err(TimerError::Closed))
+        );
     }
 
     #[test]
