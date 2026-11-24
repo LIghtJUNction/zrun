@@ -629,6 +629,32 @@ shell -- cat result; printf '|%s' --flag
 }
 
 #[test]
+fn native_await_delivers_stdout_without_a_newline_before_the_next_wait() {
+    let dir = Directory::new();
+    let path = dir.0.join("flush.zrun");
+    fs::write(
+        &path,
+        r#"# zrun:1
+async ready -- printf ready
+async blocked {"script":"while [ ! -f release ]; do sleep .01; done","timeout_ms":5000}
+await ready blocked
+"#,
+    )
+    .unwrap();
+    let mut child = zrun()
+        .current_dir(&dir.0)
+        .arg(path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    fs::write(dir.0.join("release"), b"").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(&ready, b"ready");
+}
+
+#[test]
 fn native_script_reuses_an_explicit_key_and_validates_before_running() {
     let dir = Directory::new();
     let path = dir.0.join("cache.zrun");

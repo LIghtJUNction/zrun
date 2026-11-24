@@ -148,7 +148,11 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
 
 fn emit(delivery: Delivery) -> io::Result<u8> {
     let result = delivery.result;
-    io::stdout().lock().write_all(&result.stdout)?;
+    {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&result.stdout)?;
+        stdout.flush()?;
+    }
     io::stderr().lock().write_all(&result.stderr)?;
     if let Some(error) = &result.error {
         writeln!(io::stderr().lock(), "zrun: {error}")?;
