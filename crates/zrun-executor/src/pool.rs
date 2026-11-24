@@ -28,6 +28,9 @@ thread_local! {
     static CURRENT_WORKER: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
+// Each worker writes its queue mutex and indices frequently. Keep neighboring
+// queues on separate cache lines, including on machines with adjacent-line prefetch.
+#[repr(align(128))]
 #[derive(Default)]
 struct Worker {
     ready: Mutex<VecDeque<Arc<Task>>>,
