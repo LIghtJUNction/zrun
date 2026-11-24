@@ -225,6 +225,19 @@ impl Stream {
             .await
     }
 
+    /// Enable or disable TCP_NODELAY for a TCP stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS error or Unsupported for a Unix domain stream.
+    pub fn set_nodelay(&self, enabled: bool) -> io::Result<()> {
+        match &self.0.source {
+            Socket::Tcp(socket) => socket.set_nodelay(enabled),
+            #[cfg(unix)]
+            Socket::Unix(_) => Err(io::ErrorKind::Unsupported.into()),
+        }
+    }
+
     /// Finish sending bytes while keeping the receive half open.
     ///
     /// # Errors

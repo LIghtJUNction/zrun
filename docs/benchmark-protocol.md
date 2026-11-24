@@ -127,3 +127,18 @@ Before publishing conclusions, review five points: the precise contribution bein
 `--workers 1 2 4 8 16` 为每个规模分别运行配对样本。一个 worker 沿用两个运行时的 current-thread 入口。更多 worker 使用 zrun Pool 和相同线程数的 Tokio multi-thread runtime。
 
 多线程运行时在提交期间可以执行任务。多 worker 的 yield 样本从提交前计时，包含提交及收集开销，原始记录标记 `yield_includes_submission`。单 worker 保留原来从提交后计时的口径。每个线程数下的 zrun/Tokio 样本使用相同口径。
+
+## TCP 回环对照
+
+每个样本分别启动一个服务进程和一个负载进程。服务使用 zrun 或 Tokio，负载进程使用同一个 Tokio 客户端。双方均开启 TCP_NODELAY，每条连接保持至用例结束。客户端完成连接和预热后，在同一个起点释放所有工作。每一帧都校验连接编号、序号和完整回显内容。服务端也校验预期连接和消息是否全部完成。
+
+吞吐以单向已校验的 payload 字节除以整批计时区间计算。RTT 从客户端发送起算，直到完整回显校验完成。每条连接按固定步长保留延迟样本，上限按连接数分配。报告同时保存 P50、P95、P99、原始延迟和两个进程的 CPU tick。客户端 CPU tick 对应计时阶段，服务端 CPU tick 包括建立连接和退出。
+
+每个配置运行至少 10 对独立样本，交替两侧顺序。以配对自举的 95% 区间判定吞吐是否达到 Tokio 的 95%，以及 P99 是否低于 Tokio 的 110%。查看 CPU 亲和性和客户端 CPU 使用量，判断负载生成器是否限制了吞吐。该比较覆盖回环 TCP，与外部网络、持续运行和其他平台的门禁分开。
+
+```sh
+cargo build --locked --release -p zrun-bench --bin zrun-tcp-bench
+python3 scripts/benchmark_tcp.py --binary target/release/zrun-tcp-bench \
+  --output artifacts/tcp-linux --workers 1 4 --client-workers 4 \
+  --server-affinity 0-7 --client-affinity 8-15
+```

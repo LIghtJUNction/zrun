@@ -333,8 +333,8 @@ def summarize(records, args):
     return {"metrics": cells, "full_project_gate": "not_evaluated",
             "unsupported": [{"metric": "scheduler_cpu_overhead", "reason": "yield_ns_per_op is wall time including harness, not isolated CPU overhead",
                              "normal_ratio_max": 0.85, "challenge_ratio_max": 0.50},
-                            {"metric": "tcp_throughput", "reason": "TCP comparator has not been implemented", "normal_ratio_min": 0.95, "challenge_ratio_min": 1.20},
-                            {"metric": "tcp_p99", "reason": "TCP comparator has not been implemented", "normal_ratio_max": 1.10, "challenge_ratio_max": 0.80}],
+                            {"metric": "tcp_throughput", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_min": 0.95, "challenge_ratio_min": 1.20},
+                            {"metric": "tcp_p99", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_max": 1.10, "challenge_ratio_max": 0.80}],
             "latency_note": "Per-process wake_p99_ns is summarized across independent processes; not a pooled latency P99.",
             "decision_rule": "At least 10 complete positive pairs, release binary, and entire paired-bootstrap 95% CI beyond threshold. No multiplicity correction; exploratory per-cell decisions."}
 
