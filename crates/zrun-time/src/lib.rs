@@ -164,18 +164,26 @@ impl Future for Sleep {
     type Output = Result<(), TimerError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        assert!(!this.completed, "sleep polled after completion");
-        if this
-            .key
-            .is_some_and(|(deadline, _)| deadline <= Instant::now())
-        {
-            this.waiter.finish(Ok(()));
-        }
+        self.get_mut().poll_with_clock(cx, Instant::now)
+    }
+}
 
+impl Sleep {
+    fn poll_with_clock(
+        &mut self,
+        cx: &mut Context<'_>,
+        now: impl FnOnce() -> Instant,
+    ) -> Poll<Result<(), TimerError>> {
+        assert!(!self.completed, "sleep polled after completion");
+        let expired = self.key.is_some_and(|(deadline, _)| deadline <= now());
         let mut incoming = Some(cx.waker().clone());
         let (result, previous) = {
-            let mut state = lock(&this.waiter.state);
+            let mut state = lock(&self.waiter.state);
+            // The current poll will deliver the result directly. Calling
+            // finish here would wake the previously registered waker first.
+            if expired && matches!(state.status, Status::Pending) {
+                state.status = Status::Ready(Ok(()));
+            }
             match state.status {
                 Status::Ready(value) => (Poll::Ready(value), state.waker.take()),
                 Status::Pending => (
@@ -190,8 +198,8 @@ impl Future for Sleep {
             }
         };
         if result.is_ready() {
-            this.completed = true;
-            this.deregister();
+            self.completed = true;
+            self.deregister();
         }
         drop(previous);
         drop(incoming);
@@ -449,6 +457,28 @@ mod tests {
         drop(first);
         let _accepted = timer.sleep(Duration::from_secs(86_400));
         assert_eq!(driver.len(), 1);
+    }
+
+    #[test]
+    fn polling_an_elapsed_deadline_does_not_wake_the_previous_task() {
+        let driver = driver(1);
+        let mut sleep = driver.timer().sleep(Duration::from_secs(600));
+        let deadline = sleep.key.unwrap().0;
+        let count = Arc::new(Counter::default());
+        let waker = Waker::from(count.clone());
+        let mut context = Context::from_waker(&waker);
+
+        assert!(
+            sleep
+                .poll_with_clock(&mut context, || deadline - Duration::from_secs(1))
+                .is_pending()
+        );
+        assert_eq!(
+            sleep.poll_with_clock(&mut context, || deadline),
+            Poll::Ready(Ok(()))
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        assert!(driver.is_empty());
     }
 
     #[test]
