@@ -10,15 +10,21 @@
 
 ## P1：多线程调度
 
-在 P0 状态机得到验证后，引入 worker 本地队列、有界外部注入和自适应 work stealing。覆盖队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。
+候选实现提供 `Pool` 与跨线程 `PoolSpawner`。工作线程维护各自队列，空闲者从同池队列按有限批次窃取任务。定时器由首个 worker 推进，根 Future 仍在调用线程执行。`Runtime` 保留 P0 单线程入口。候选只有在完成下方性能和生命周期门槛后才进入正式发行。
+
+继续验证队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。
 
 ## P2：TCP IO
 
-Linux epoll reactor 为首发实现。定义 socket 注册、readiness 重新武装、取消、关闭与 fd 重用的代际身份。实测连接数、payload、背压、TCP 吞吐及尾延迟；基准同机同配置运行 Tokio。io_uring 单独作为实验，不改变默认 IO 路径。
+可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。实测连接数、payload、背压、TCP 吞吐及尾延迟；基准同机同配置运行 Tokio。io_uring 单独作为实验，不改变默认 IO 路径。
 
 ## P3：平台与优化
 
 实现并分别验证 macOS kqueue 与 Windows IOCP。根据 CPU profile 和内存数据优化任务布局、调度批量、偷取阈值和 timer 结构；每个优化都必须保留正确性门禁。完整 24 小时 soak 和跨平台 CI 结果进入正式发布决策。2026-11-23 用户已授权公开 P0 预览发行；完整正式版仍按上述性能、稳定性和平台门禁决定。
+
+## 命令服务
+
+[命令协议](agent-shell.md) 规定 CLI、MCP 和 Unix socket 的共用入口，并定义复用键、输出、排队和接入语义。Linux 命令服务已完成首轮本地验证。常驻服务的多 worker 扩容、持续高负载下的请求与结果字节预算，以及其他平台的托管进程实现继续单独验收。
 
 ## 状态记录规则
 

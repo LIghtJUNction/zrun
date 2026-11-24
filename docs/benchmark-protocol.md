@@ -6,7 +6,7 @@ This protocol measures the current-thread runtime implemented in [zrun](../src/l
 
 The [comparator](../crates/zrun-bench/src/main.rs) uses identical Future implementations for both engines. Its generic adapters are compiled separately and do not box each task. Tokio is confined to the unpublished `zrun-bench` package; `zrun` remains the native runtime. Tokio uses `Builder::new_current_thread().enable_time()`. zrun uses `Runtime::with_max_tasks(tasks)`, including an explicit capacity of 1,000,000 for that scale. Runtime construction and JSON serialization are outside throughput timing.
 
-P0 supports `workers=1`. Requested values `2`, `4`, `8`, and `16` are retained as `unsupported`; they are never relabeled as single-thread results. The Rust CLI also returns an `unsupported` JSON record and exit code 2 for any other worker count. The future matrix contains those worker counts and task scales 1,000, 10,000, 100,000, and 1,000,000. Unrequested cells remain untested. TCP and isolated scheduler CPU overhead have no P0 measurements.
+The worker matrix is 1, 2, 4, 8, and 16. Task scales are 1,000, 10,000, 100,000, and 1,000,000. Unrequested cells remain untested. TCP and isolated scheduler CPU overhead still require separate comparators.
 
 Table 1. Work performed and the boundary of each measurement.
 
@@ -75,7 +75,7 @@ Table 2. P0 ratio directions and targets inherited from the design.
 
 Each process's `wake_p99_ns` is computed from its retained raw latencies. The runner verifies that value and summarizes those process P99 values; the summary's P99 is **not** a pooled P99 over all tasks and rounds. Low latency-sample counts and short runs should remain visible in any interpretation.
 
-`missing_or_nonpositive_measurements`, `insufficient_independent_rounds`, `requires_release_build`, `not_requested` and `unsupported` never pass. Source/CI failures also remain separate from performance. The full project gate is always `not_evaluated` by this P0 runner because CPU-overhead isolation, TCP and multi-worker evidence are absent. The report preserves their future thresholds, including CPU overhead ≤ 0.85/0.50, TCP throughput ≥ 0.95/1.20, and TCP P99 ≤ 1.10/0.80.
+`missing_or_nonpositive_measurements`, `insufficient_independent_rounds`, `requires_release_build`, `not_requested` and `unsupported` never pass. Source/CI failures also remain separate from performance. The full project gate remains `not_evaluated` because this runner does not cover isolated scheduler CPU overhead or TCP. The report preserves their future thresholds, including CPU overhead ≤ 0.85/0.50, TCP throughput ≥ 0.95/1.20, and TCP P99 ≤ 1.10/0.80.
 
 ## 4. Explicit, cancellable soak duration
 
@@ -121,3 +121,9 @@ Table 3. Claims and the evidence needed before reporting them.
 | A scheduling mechanism causes an improvement | Controlled ablation with other settings held fixed | No causal claim from the comparator |
 
 Before publishing conclusions, review five points: the precise contribution being claimed, reproducibility of the written protocol, strength of the measured effect, completeness of scales/platforms/workloads, and whether the metric actually tests the stated mechanism. Preserve failures and narrow claims to observed configurations. This review structure follows the user-requested [Research-Paper-Writing-Skills](https://github.com/Master-cai/Research-Paper-Writing-Skills), particularly its experiment and evidence-review guidance.
+
+## 多 worker 候选
+
+`--workers 1 2 4 8 16` 为每个规模分别运行配对样本。一个 worker 沿用两个运行时的 current-thread 入口。更多 worker 使用 zrun Pool 和相同线程数的 Tokio multi-thread runtime。
+
+多线程运行时在提交期间可以执行任务。多 worker 的 yield 样本从提交前计时，包含提交及收集开销，原始记录标记 `yield_includes_submission`。单 worker 保留原来从提交后计时的口径。每个线程数下的 zrun/Tokio 样本使用相同口径。

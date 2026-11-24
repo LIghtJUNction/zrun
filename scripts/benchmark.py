@@ -288,17 +288,17 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     return None
 
 
-def collect_sample(args, output, round_index, tasks, scenario, engine):
-    prefix = f"r{round_index:03d}-t{tasks}-{scenario}-{engine}"
+def collect_sample(args, output, round_index, tasks, workers, scenario, engine):
+    prefix = f"r{round_index:03d}-w{workers}-t{tasks}-{scenario}-{engine}"
     command = [str(args.binary), "--engine", engine, "--scenario", scenario, "--tasks", str(tasks),
-               "--workers", "1", "--yields", str(args.yields), "--latency-samples", str(args.latency_samples),
+               "--workers", str(workers), "--yields", str(args.yields), "--latency-samples", str(args.latency_samples),
                "--hold-ms", str(args.hold_ms)]
     record = run_process(command, output / f"{prefix}.stdout.json", output / f"{prefix}.stderr.txt", args.timeout)
-    record.update(round=round_index, tasks=tasks, workers=1, scenario=scenario, engine=engine)
+    record.update(round=round_index, tasks=tasks, workers=workers, scenario=scenario, engine=engine)
     if record["status"] == "ok":
         try:
             raw = json.loads((output / record["stdout"]).read_text(encoding="utf-8"))
-            error = validate_sample(raw, engine, scenario, tasks, 1, args.yields, args.latency_samples, args.hold_ms)
+            error = validate_sample(raw, engine, scenario, tasks, workers, args.yields, args.latency_samples, args.hold_ms)
             record["sample"] = raw
             if error:
                 record.update(status="invalid_sample", error=error)
@@ -313,16 +313,16 @@ def summarize(records, args):
         for tasks in args.tasks:
             for name, (scenario, direction, normal, challenge, unit) in METRICS.items():
                 row = {"workers": workers, "tasks": tasks, "metric": name, "scenario": scenario, "unit": unit}
-                if workers != 1 or scenario not in args.scenarios:
-                    row.update(status="unsupported" if workers != 1 else "not_requested",
+                if scenario not in args.scenarios:
+                    row.update(status="not_requested",
                                normal_pass=False, challenge_pass=False)
                     cells.append(row)
                     continue
                 found = {(r["round"], r["engine"]): r for r in records
-                         if r["tasks"] == tasks and r["scenario"] == scenario and r["status"] == "ok"}
+                         if r["tasks"] == tasks and r["workers"] == workers and r["scenario"] == scenario and r["status"] == "ok"}
                 values = {e: [found.get((i, e), {}).get("sample", {}).get("metrics", {}).get(name)
                               for i in range(args.rounds)] for e in ("zrun", "tokio")}
-                seed = stable_seed(args.seed, tasks, name)
+                seed = stable_seed(args.seed, workers, tasks, name)
                 row["engines"] = {e: describe(v, args.bootstrap, stable_seed(seed, e)) for e, v in values.items()}
                 release = all(found.get((i, e), {}).get("sample", {}).get("build", {}).get("profile") == "release"
                               for i in range(args.rounds) for e in ("zrun", "tokio"))
@@ -333,9 +333,8 @@ def summarize(records, args):
     return {"metrics": cells, "full_project_gate": "not_evaluated",
             "unsupported": [{"metric": "scheduler_cpu_overhead", "reason": "yield_ns_per_op is wall time including harness, not isolated CPU overhead",
                              "normal_ratio_max": 0.85, "challenge_ratio_max": 0.50},
-                            {"metric": "tcp_throughput", "reason": "P0 has no TCP reactor", "normal_ratio_min": 0.95, "challenge_ratio_min": 1.20},
-                            {"metric": "tcp_p99", "reason": "P0 has no TCP reactor", "normal_ratio_max": 1.10, "challenge_ratio_max": 0.80},
-                            {"workers": [2, 4, 8, 16], "reason": "P0 current-thread executor only"}],
+                            {"metric": "tcp_throughput", "reason": "TCP comparator has not been implemented", "normal_ratio_min": 0.95, "challenge_ratio_min": 1.20},
+                            {"metric": "tcp_p99", "reason": "TCP comparator has not been implemented", "normal_ratio_max": 1.10, "challenge_ratio_max": 0.80}],
             "latency_note": "Per-process wake_p99_ns is summarized across independent processes; not a pooled latency P99.",
             "decision_rule": "At least 10 complete positive pairs, release binary, and entire paired-bootstrap 95% CI beyond threshold. No multiplicity correction; exploratory per-cell decisions."}
 
@@ -432,24 +431,25 @@ def main():
               "samples": [], "future_matrix": {"workers": list(WORKERS), "tasks": list(TASK_SCALES)}}
     atomic_json(output / "report.json", report)
     for i in range(args.rounds):
-        for tasks in args.tasks:
-            for scenario in args.scenarios:
-                if STOP_REQUESTED or 1 not in args.workers:
-                    break
-                for engine in (("zrun", "tokio") if i % 2 == 0 else ("tokio", "zrun")):
+        for workers in args.workers:
+            for tasks in args.tasks:
+                for scenario in args.scenarios:
                     if STOP_REQUESTED:
                         break
-                    sample = collect_sample(args, output, i, tasks, scenario, engine)
-                    report["samples"].append(sample)
-                    atomic_json(output / "report.json", report)
-                    print(f"round={i + 1}/{args.rounds} tasks={tasks} scenario={scenario} engine={engine} status={sample['status']}", flush=True)
-    report["status"] = "cancelled" if STOP_REQUESTED else ("completed" if 1 in args.workers else "unsupported")
+                    for engine in (("zrun", "tokio") if i % 2 == 0 else ("tokio", "zrun")):
+                        if STOP_REQUESTED:
+                            break
+                        sample = collect_sample(args, output, i, tasks, workers, scenario, engine)
+                        report["samples"].append(sample)
+                        atomic_json(output / "report.json", report)
+                        print(f"round={i + 1}/{args.rounds} workers={workers} tasks={tasks} scenario={scenario} engine={engine} status={sample['status']}", flush=True)
+    report["status"] = "cancelled" if STOP_REQUESTED else "completed"
     if not STOP_REQUESTED and any(s["status"] != "ok" for s in report["samples"]):
         report["status"] = "completed_with_errors"
     report["summary"] = summarize(report["samples"], args)
     atomic_json(output / "report.json", report)
     print(output / "report.json")
-    return 130 if STOP_REQUESTED else (2 if report["status"] == "unsupported" else (1 if report["status"] == "completed_with_errors" else 0))
+    return 130 if STOP_REQUESTED else int(report["status"] == "completed_with_errors")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,9 @@ use zrun_task::{JoinHandle, Scheduler, Task};
 use zrun_time::{Driver, Timer};
 
 mod parking;
+mod pool;
 use parking::ParkingFlag;
+pub use pool::{Pool, PoolSpawner};
 
 pub const DEFAULT_MAX_TASKS: usize = 65_536;
 const TASK_TURN_BUDGET: usize = 64;
@@ -66,13 +68,18 @@ struct Parker {
 
 impl Parker {
     fn notify(&self) {
+        self.notify_waiter();
+    }
+
+    fn notify_waiter(&self) -> bool {
         if !self.parking.notify() {
-            return;
+            return false;
         }
         let thread = { lock(&self.runner).clone() };
         if let Some(thread) = thread {
             thread.unpark();
         }
+        true
     }
 
     fn register(self: &Arc<Self>) -> RunnerGuard {
@@ -197,28 +204,28 @@ impl Scheduler for Shared {
     }
 
     fn finished(&self, task: &Task) {
-        let removed = {
-            let mut state = lock(&self.state);
-            let index = task.registry_index();
-            if !state
-                .tasks
-                .get(index)
-                .is_some_and(|registered| std::ptr::eq(registered.as_ref(), task))
-            {
-                // Shutdown has already detached the entire registry. A stale
-                // callback also cannot remove a different task at a reused slot.
-                return;
-            }
-            let removed = state.tasks.swap_remove(index);
-            removed.set_registry_index(usize::MAX);
-            if let Some(moved) = state.tasks.get(index) {
-                moved.set_registry_index(index);
-            }
-            removed
-        };
+        let removed = { remove_task(&mut lock(&self.state).tasks, task) };
         // A task's destructor may call back into the runtime.
         drop(removed);
     }
+}
+
+fn remove_task(tasks: &mut Vec<Arc<Task>>, task: &Task) -> Option<Arc<Task>> {
+    let index = task.registry_index();
+    if !tasks
+        .get(index)
+        .is_some_and(|registered| std::ptr::eq(registered.as_ref(), task))
+    {
+        // Shutdown may already have detached the registry. Stale callbacks
+        // cannot remove another task that has since moved into this slot.
+        return None;
+    }
+    let removed = tasks.swap_remove(index);
+    removed.set_registry_index(usize::MAX);
+    if let Some(moved) = tasks.get(index) {
+        moved.set_registry_index(index);
+    }
+    Some(removed)
 }
 
 /// Cross-thread admission handle. Old handles cannot retain or revive a runtime.

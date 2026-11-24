@@ -42,7 +42,7 @@ impl Config {
         while let Some(key) = args.next() {
             if key == "--help" {
                 println!(
-                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
                 );
                 std::process::exit(0);
             }
@@ -84,6 +84,7 @@ impl Config {
             return Err("unknown scenario".into());
         }
         if !(1..=1_000_000).contains(&c.tasks)
+            || ![1, 2, 4, 8, 16].contains(&c.workers)
             || !(1..=10_000).contains(&c.yields)
             || !(1..=100_000).contains(&c.latency_samples)
             || c.hold_ms > 10_000
@@ -102,7 +103,8 @@ impl Config {
             "workers": self.workers, "tasks": self.tasks, "status": status,
             "config": {"yields": self.yields, "latency_samples": self.latency_samples,
                 "hold_ms": self.hold_ms, "duration_secs": self.duration_secs,
-                "sample_interval_ms": self.sample_interval_ms, "timer_enabled": true},
+                "sample_interval_ms": self.sample_interval_ms, "timer_enabled": true,
+                "yield_includes_submission": self.workers > 1},
             "build": {"rustc": env!("ZRUN_BENCH_RUSTC"), "profile": env!("ZRUN_BENCH_PROFILE"),
                 "target": env!("ZRUN_BENCH_TARGET"), "opt_level": env!("ZRUN_BENCH_OPT_LEVEL"),
                 "encoded_rustflags": env!("ZRUN_BENCH_CARGO_ENCODED_RUSTFLAGS"),
@@ -160,7 +162,7 @@ trait Engine: Sized {
     type Handle<T>: Future<Output = Result<T, String>> + Unpin + Abort
     where
         T: Send + 'static;
-    fn new(max_tasks: usize) -> Result<Self, String>;
+    fn new(config: &Config) -> Result<Self, String>;
     fn spawn<F>(&self, future: F) -> Result<Self::Handle<F::Output>, String>
     where
         F: Future + Send + 'static,
@@ -174,8 +176,31 @@ impl Engine for zrun::Runtime {
         = ZrunJoin<T>
     where
         T: Send + 'static;
-    fn new(max_tasks: usize) -> Result<Self, String> {
-        Self::with_max_tasks(max_tasks).map_err(|e| e.to_string())
+    fn new(config: &Config) -> Result<Self, String> {
+        Self::with_max_tasks(config.tasks).map_err(|e| e.to_string())
+    }
+    fn spawn<F>(&self, f: F) -> Result<Self::Handle<F::Output>, String>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn(f).map(ZrunJoin).map_err(|e| e.to_string())
+    }
+    fn block_on<F: Future>(&mut self, f: F) -> F::Output {
+        self.block_on(f)
+    }
+    fn alive(&self) -> usize {
+        self.stats().active_tasks
+    }
+}
+
+impl Engine for zrun::Pool {
+    type Handle<T>
+        = ZrunJoin<T>
+    where
+        T: Send + 'static;
+    fn new(config: &Config) -> Result<Self, String> {
+        Self::with_max_tasks(config.workers, config.tasks).map_err(|e| e.to_string())
     }
     fn spawn<F>(&self, f: F) -> Result<Self::Handle<F::Output>, String>
     where
@@ -197,11 +222,15 @@ impl Engine for tokio::runtime::Runtime {
         = TokioJoin<T>
     where
         T: Send + 'static;
-    fn new(_: usize) -> Result<Self, String> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(|e| e.to_string())
+    fn new(config: &Config) -> Result<Self, String> {
+        let mut builder = if config.workers == 1 {
+            tokio::runtime::Builder::new_current_thread()
+        } else {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(config.workers);
+            builder
+        };
+        builder.enable_time().build().map_err(|e| e.to_string())
     }
     fn spawn<F>(&self, f: F) -> Result<Self::Handle<F::Output>, String>
     where
@@ -369,10 +398,21 @@ fn batch<E: Engine>(rt: &mut E, tasks: usize, yields: usize) -> Result<u64, Stri
         })?);
     }
     let checksum = rt.block_on(join_indices(handles))?;
-    if rt.alive() != 0 {
-        return Err("tasks still active after all joins".into());
-    }
+    require_idle(rt)?;
     Ok(checksum)
+}
+
+fn require_idle(engine: &impl Engine) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    // A join can wake the caller before a background worker retires its
+    // registry entry. Keep this drain boundary outside measured intervals.
+    while engine.alive() != 0 {
+        if Instant::now() >= deadline {
+            return Err("tasks remain active after scenario".into());
+        }
+        std::thread::yield_now();
+    }
+    Ok(())
 }
 
 fn emit(value: &Value) -> Result<(), String> {
@@ -427,7 +467,7 @@ fn soak<E: Engine>(c: &Config, mut rt: E) -> Result<Value, String> {
 fn run<E: Engine>(c: &Config) -> Result<Value, String> {
     // Read the same RSS source before and after runtime construction.
     let process_rss = rss();
-    let mut rt = E::new(c.tasks)?;
+    let mut rt = E::new(c)?;
     rt.block_on(async {});
     let runtime_rss = rss();
     if c.scenario == "soak" {
@@ -449,6 +489,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
             metrics = json!({"elapsed_ns": ns, "spawn_join_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64});
         }
         "yield" => {
+            let ready_start = Instant::now();
             let mut handles = Vec::with_capacity(c.tasks);
             for index in 0..c.tasks {
                 handles.push(rt.spawn(YieldWork {
@@ -456,7 +497,11 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
                     index,
                 })?);
             }
-            let started = Instant::now();
+            let started = if c.workers == 1 {
+                Instant::now()
+            } else {
+                ready_start
+            };
             checksum = rt.block_on(join_indices(handles))?;
             let ns = started.elapsed().as_nanos().max(1) as u64;
             let ops = c.tasks as u64 * c.yields as u64;
@@ -545,9 +590,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
         }
         _ => return Err("unhandled scenario".into()),
     }
-    if rt.alive() != 0 {
-        return Err("tasks remain active after scenario".into());
-    }
+    require_idle(&rt)?;
     result["metrics"] = metrics;
     result["correctness"] = json!(true);
     result["completed_tasks"] = json!(completed);
@@ -566,18 +609,10 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if c.workers != 1 {
-        let mut r = c.record("unsupported");
-        r["reason"] = json!("P0 implements only current-thread worker=1");
-        r["supported_workers"] = json!([1]);
-        r["future_worker_matrix"] = json!([1, 2, 4, 8, 16]);
-        let _ = emit(&r);
-        std::process::exit(2);
-    }
-    let result = if c.engine == "zrun" {
-        run::<zrun::Runtime>(&c)
-    } else {
-        run::<tokio::runtime::Runtime>(&c)
+    let result = match (c.engine.as_str(), c.workers) {
+        ("zrun", 1) => run::<zrun::Runtime>(&c),
+        ("zrun", _) => run::<zrun::Pool>(&c),
+        _ => run::<tokio::runtime::Runtime>(&c),
     };
     match result {
         Ok(value) => {

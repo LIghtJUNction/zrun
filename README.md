@@ -2,7 +2,7 @@
 
 zrun 提供独立的 Rust 异步运行时和面向 AI agent 的 Linux 命令执行服务。终端、批量脚本和 MCP 客户端可以向同一个进程提交命令。服务为可复用命令合并并发请求，缓存有明确输入版本的成功结果，并限制进程数、排队字节数和输出大小。
 
-运行时的长期目标是成为 Tokio 的替代选项。当前核心提供 **P0 单线程调度器、任务生命周期、定时器和结果通道**，另外通过 `io` feature 提供异步 TCP、Unix socket 和 Unix 文件描述符。Tokio 位于独立比较程序，多线程运行时和性能门槛见[阶段计划](docs/plan.md)。
+运行时的长期目标是成为 Tokio 的替代选项。当前核心提供 **P0 单线程调度器、任务生命周期、定时器和结果通道**，另外通过 `io` feature 提供异步 TCP、Unix socket 和 Unix 文件描述符。Tokio 位于独立比较程序，多线程候选 `Pool` 与性能门槛见[阶段计划](docs/plan.md)。
 
 当前发行是 **0.1.0-p0.1 预览版**，提供可复现源码与验证流程。性能目标仍是后续验收条件；首次测量尚未达到这些目标。参见 [发行说明](docs/releases/0.1.0-p0.1.md)。
 
@@ -54,6 +54,8 @@ cargo test --locked --test runtime one_million_tasks_have_no_loss -- --ignored -
 ```
 
 Project Z 开发机的 Cargo 命令必须进入仓库约定的单个外层共享构建锁；上面只展示标准 Cargo 参数。不要在已有锁内再次获取同一把锁。
+
+多线程场景可使用 `zrun::Pool::new(4)`，通过 `spawn` 或 `spawner` 提交任务，再用 `block_on` 等待结果。每个 worker 维护自己的就绪队列，闲置时可接手同池任务。现有 `Runtime` 继续使用单线程调用方式。
 
 ## 从 Future 到结果
 
@@ -108,7 +110,7 @@ zrun 是协作式调度器。一个从不返回的 Future::poll 会阻塞该执�
 
 普通目标包括 spawn/join 与 wake 吞吐至少为 Tokio 的 1.2 倍、调度开销与每任务内存不高于 85%、空闲增量 RSS 不高于 80%、P99 wake 延迟不高于 100%。完整目标、挑战目标和各指标方向见 [设计中的门槛表](docs/design.md#性能验收协议)。没有测量的数据保持未验证。
 
-P0 只比较单 worker。多 worker 队列与窃取属于 P1；Linux epoll、TCP 测量属于 P2；kqueue/IOCP 属于 P3。Loom、Miri、百万任务、取消风暴与 24 小时 soak 的结果需要分别记录，短期测试不能替代长期稳定性验证。
+P0 的历史结果只对应单 worker。当前比较程序支持 1/2/4/8/16 worker，TCP 与跨平台测量沿用各阶段门槛。Loom、Miri、百万任务、取消风暴与 24 小时 soak 的结果需要分别记录，短期测试不能替代长期稳定性验证。
 
 ## 后续阶段
 
