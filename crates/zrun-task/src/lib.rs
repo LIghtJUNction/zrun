@@ -1,9 +1,9 @@
 //! Task ownership, join results, cancellation, and the task RawWaker.
 //!
-//! The state lock protects the unique future and the scheduling flags together.
-//! Only Queued -> Running grants poll ownership. A wake while Running sets a
-//! notification bit; it never places a second runnable in the queue. User code,
-//! future drops, result delivery, and scheduler callbacks run outside this lock.
+//! Atomic scheduling state grants the unique poll or shutdown reservation.
+//! The future slot is locked only when ownership transfers. A poll owner
+//! retains the future across inline repolls and restores it before publishing
+//! Idle or Queued. User code and scheduler callbacks run outside the slot lock.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -16,6 +16,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+mod schedule;
+
+use schedule::{Begin, Pending, ScheduleState};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -175,135 +179,13 @@ pub trait Scheduler: Send + Sync {
 
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Phase {
-    Queued,
-    Running,
-    Idle,
-    Complete,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CancelReason {
-    Abort,
-    Shutdown,
-}
-
-impl CancelReason {
-    fn error(self) -> JoinError {
-        match self {
-            Self::Abort => JoinError::Cancelled,
-            Self::Shutdown => JoinError::Shutdown,
-        }
-    }
-}
-
-/// These exact transitions are also exercised directly by the order tests.
-#[derive(Debug)]
-struct ScheduleState {
-    phase: Phase,
-    notified: bool,
-    cancel: Option<CancelReason>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum Begin {
-    Skip,
-    Poll,
-    Cancel(CancelReason),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum Pending {
-    Repoll,
-    Idle,
-    Requeue,
-    Cancel(CancelReason),
-}
-
-impl ScheduleState {
-    fn new() -> Self {
-        Self {
-            phase: Phase::Queued,
-            notified: false,
-            cancel: None,
-        }
-    }
-
-    /// Returns true only to the caller responsible for inserting a runnable.
-    fn wake(&mut self) -> bool {
-        match self.phase {
-            Phase::Idle => {
-                self.phase = Phase::Queued;
-                true
-            }
-            Phase::Running => {
-                self.notified = true;
-                false
-            }
-            Phase::Queued | Phase::Complete => false,
-        }
-    }
-
-    fn abort(&mut self) -> bool {
-        if self.phase == Phase::Complete {
-            return false;
-        }
-        self.cancel.get_or_insert(CancelReason::Abort);
-        self.wake()
-    }
-
-    fn begin(&mut self) -> Begin {
-        if self.phase != Phase::Queued {
-            return Begin::Skip;
-        }
-        if let Some(reason) = self.cancel {
-            self.complete();
-            return Begin::Cancel(reason);
-        }
-        self.phase = Phase::Running;
-        self.notified = false;
-        Begin::Poll
-    }
-
-    fn pending(&mut self, can_repoll: bool) -> Pending {
-        debug_assert_eq!(self.phase, Phase::Running);
-        if let Some(reason) = self.cancel {
-            self.complete();
-            Pending::Cancel(reason)
-        } else if self.notified {
-            self.notified = false;
-            if can_repoll {
-                Pending::Repoll
-            } else {
-                self.phase = Phase::Queued;
-                Pending::Requeue
-            }
-        } else {
-            self.phase = Phase::Idle;
-            Pending::Idle
-        }
-    }
-
-    fn complete(&mut self) {
-        self.phase = Phase::Complete;
-        self.notified = false;
-    }
-}
-
-struct TaskState {
-    schedule: ScheduleState,
-    // Some only outside a poll. Running transfers the one Pin<Box<_>> to the
-    // driver stack; Complete retains no future, even when old wakers survive.
-    future: Option<TaskFuture>,
-}
-
 /// Internal task allocation. Only the executor drives run_once and shutdown.
 #[doc(hidden)]
 pub struct Task {
     id: u64,
     registry_index: AtomicUsize,
-    state: Mutex<TaskState>,
+    schedule: ScheduleState,
+    future: Mutex<Option<TaskFuture>>,
     scheduler: Weak<dyn Scheduler>,
     completion: Arc<dyn Completion>,
 }
@@ -331,10 +213,8 @@ impl Task {
         let task = Arc::new(Self {
             id,
             registry_index: AtomicUsize::new(usize::MAX),
-            state: Mutex::new(TaskState {
-                schedule: ScheduleState::new(),
-                future: Some(Box::pin(wrapped)),
-            }),
+            schedule: ScheduleState::new(),
+            future: Mutex::new(Some(Box::pin(wrapped))),
             scheduler,
             completion: completion.clone(),
         });
@@ -365,8 +245,7 @@ impl Task {
     }
 
     fn schedule(self: &Arc<Self>) {
-        let enqueue = { lock(&self.state).schedule.wake() };
-        if enqueue {
+        if self.schedule.wake() {
             self.enqueue();
         }
     }
@@ -378,8 +257,7 @@ impl Task {
     }
 
     fn request_abort(self: &Arc<Self>) {
-        let enqueue = { lock(&self.state).schedule.abort() };
-        if enqueue {
+        if self.schedule.abort() {
             self.enqueue();
         }
     }
@@ -400,18 +278,14 @@ impl Task {
     /// during those polls. The driver keeps the future and its waker across
     /// the inline polls. When the budget expires, it publishes one runnable.
     pub fn run_budget(self: &Arc<Self>, mut inline_repolls: usize) {
-        let (mut future, cancelled) = {
-            let mut state = lock(&self.state);
-            let cancelled = match state.schedule.begin() {
-                Begin::Skip => return,
-                Begin::Poll => None,
-                Begin::Cancel(reason) => Some(reason),
-            };
-            (
-                state.future.take().expect("a runnable owns one future"),
-                cancelled,
-            )
+        let cancelled = match self.schedule.begin() {
+            Begin::Skip => return,
+            Begin::Poll => None,
+            Begin::Cancel(reason) => Some(reason),
         };
+        let mut future = lock(&self.future)
+            .take()
+            .expect("a runnable owns one future");
 
         if let Some(reason) = cancelled {
             self.finish_failure(future, reason.error());
@@ -424,32 +298,29 @@ impl Task {
             let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
             match result {
                 Ok(Poll::Pending) => {
-                    let mut state = lock(&self.state);
-                    match state.schedule.pending(inline_repolls != 0) {
-                        Pending::Repoll => {
-                            // Authorize the next poll while checking cancellation.
-                            // Running continues to exclude other drivers.
-                            inline_repolls -= 1;
-                        }
-                        Pending::Idle => {
-                            state.future = Some(future);
-                            return;
-                        }
+                    if inline_repolls != 0 && self.schedule.try_repoll() {
+                        inline_repolls -= 1;
+                        continue;
+                    }
+                    let mut slot = lock(&self.future);
+                    *slot = Some(future);
+                    match self.schedule.pending() {
+                        Pending::Idle => return,
                         Pending::Requeue => {
-                            state.future = Some(future);
-                            drop(state);
+                            drop(slot);
                             self.enqueue();
                             return;
                         }
                         Pending::Cancel(reason) => {
-                            drop(state);
+                            let future = slot.take().expect("poll owner returned its future");
+                            drop(slot);
                             self.finish_failure(future, reason.error());
                             return;
                         }
                     }
                 }
                 Ok(Poll::Ready(())) => {
-                    lock(&self.state).schedule.complete();
+                    self.schedule.complete();
                     // Success was published by the wrapper. A destructor panic
                     // cannot replace that already delivered result.
                     let _ = drop_future(future);
@@ -457,7 +328,7 @@ impl Task {
                     return;
                 }
                 Err(payload) => {
-                    lock(&self.state).schedule.complete();
+                    self.schedule.complete();
                     self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
                     return;
                 }
@@ -478,25 +349,10 @@ impl Task {
     /// Terminate an unpolled/idle task on the driver thread. A concurrent poll
     /// keeps its ownership and observes Shutdown when it next returns Pending.
     pub fn shutdown(&self) {
-        let terminate = {
-            let mut state = lock(&self.state);
-            match state.schedule.phase {
-                Phase::Complete => return,
-                Phase::Running => {
-                    state.schedule.cancel.get_or_insert(CancelReason::Shutdown);
-                    return;
-                }
-                Phase::Queued | Phase::Idle => {
-                    let reason = *state.schedule.cancel.get_or_insert(CancelReason::Shutdown);
-                    state.schedule.complete();
-                    (
-                        state.future.take().expect("a live task owns one future"),
-                        reason,
-                    )
-                }
-            }
-        };
-        self.finish_failure(terminate.0, terminate.1.error());
+        if let Some(reason) = self.schedule.shutdown() {
+            let future = lock(&self.future).take().expect("shutdown owns one future");
+            self.finish_failure(future, reason.error());
+        }
     }
 }
 
@@ -525,13 +381,9 @@ const TASK_WAKER_VTABLE: RawWakerVTable =
 
 impl Drop for Task {
     fn drop(&mut self) {
-        let state = self
-            .state
-            .get_mut()
-            .unwrap_or_else(|poison| poison.into_inner());
         // Executors explicitly resolve registered tasks. This path also closes
         // a task whose initial runnable was dropped before registration.
-        if state.schedule.phase != Phase::Complete {
+        if !self.schedule.is_complete() {
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 self.completion.fail(JoinError::Shutdown)
             }));
@@ -597,9 +449,10 @@ impl Future for YieldNow {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use crate::schedule::CancelReason;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -892,22 +745,21 @@ mod tests {
     }
 
     #[test]
-    fn actual_wake_pending_transitions_cover_both_lock_orders() {
-        // Mutex serialization means concurrent wake/return-Pending has exactly
-        // these two relevant transition orders. This is an exhaustive test of
+    fn actual_wake_pending_transitions_cover_both_orders() {
+        // The atomic transitions serialize wake and return-Pending into
+        // these two relevant orders. This is an exhaustive test of
         // the implementation's transition functions, not a claimed Loom run.
         for wake_first in [true, false] {
-            let mut state = ScheduleState::new();
+            let state = ScheduleState::new();
             assert_eq!(state.begin(), Begin::Poll);
             let mut enqueue_count = 0;
             if wake_first {
                 enqueue_count += usize::from(state.wake());
-                enqueue_count += usize::from(state.pending(false) == Pending::Requeue);
+                enqueue_count += usize::from(state.pending() == Pending::Requeue);
             } else {
-                assert_eq!(state.pending(false), Pending::Idle);
+                assert_eq!(state.pending(), Pending::Idle);
                 enqueue_count += usize::from(state.wake());
             }
-            assert_eq!(state.phase, Phase::Queued);
             assert_eq!(enqueue_count, 1);
             assert!(!state.wake());
             assert_eq!(state.begin(), Begin::Poll);
@@ -915,19 +767,19 @@ mod tests {
     }
 
     #[test]
-    fn actual_abort_pending_transitions_cover_both_lock_orders() {
+    fn actual_abort_pending_transitions_cover_both_orders() {
         for abort_first in [true, false] {
-            let mut state = ScheduleState::new();
+            let state = ScheduleState::new();
             assert_eq!(state.begin(), Begin::Poll);
             if abort_first {
                 assert!(!state.abort());
-                assert_eq!(state.pending(false), Pending::Cancel(CancelReason::Abort));
+                assert_eq!(state.pending(), Pending::Cancel(CancelReason::Abort));
             } else {
-                assert_eq!(state.pending(false), Pending::Idle);
+                assert_eq!(state.pending(), Pending::Idle);
                 assert!(state.abort());
                 assert_eq!(state.begin(), Begin::Cancel(CancelReason::Abort));
             }
-            assert_eq!(state.phase, Phase::Complete);
+            assert!(state.is_complete());
             assert!(!state.wake());
             assert!(!state.abort());
             assert_eq!(state.begin(), Begin::Skip);
