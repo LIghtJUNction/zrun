@@ -12,11 +12,11 @@
 
 候选实现提供 `Pool` 与跨线程 `PoolSpawner`。工作线程维护各自队列，空闲者从同池队列按有限批次窃取任务。定时器由首个 worker 推进，根 Future 仍在调用线程执行。`Runtime` 保留 P0 单线程入口。候选只有在完成下方性能和生命周期门槛后才进入正式发行。
 
-继续验证队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。Linux 的 100,000 任务已覆盖五档 worker。本地续跑队列降低了唤醒 CPU 开销，跨线程 P99、吞吐和 CPU / wake 仍未全面达到 Tokio 领先门槛。前一版的四 worker 24 小时长测正在进行。[实测与回归](measurements/local-ready-linux-20261124.md)
+继续验证队列迁移、运行与取消竞争、shutdown 排空及跨 worker timer 唤醒。执行 1/2/4/8/16 worker 全矩阵、Loom、Miri、百万任务和取消风暴；并发正确性先于性能结论。Linux 的 100,000 任务已覆盖五档 worker。Future 槽由原子调度状态交接，降低了每任务内存和单 worker 的唤醒 CPU 开销。对 Tokio 的全矩阵仍未验收。此前候选的四 worker 24 小时长测正在进行。[实测与回归](measurements/future-slot-linux-20261124.md)
 
 ## P2：TCP IO
 
-可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。当前版 Linux 回环 TCP 的 24 个指标配置有 3 个通过严格领先门槛，均为 8 worker 的往返 P99。TCP 吞吐、更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/local-ready-linux-20261124.md)
+可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。当前版 Linux 回环 TCP 的 24 个指标配置有 4 个通过严格领先门槛，均为往返 P99。TCP 吞吐、更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/future-slot-linux-20261124.md)
 
 ## P3：平台与优化
 
