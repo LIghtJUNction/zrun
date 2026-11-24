@@ -25,6 +25,7 @@ const MAX_TIMEOUT_MS: u64 = 3_600_000;
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_OUTPUT: usize = 65_536;
 const PARALLEL: usize = 32;
+const ADMISSION_CHUNK: usize = 8;
 const BATCH_WINDOW: usize = 128;
 const MAX_WAITERS: usize = 4_096;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
@@ -466,14 +467,17 @@ impl Broker {
         }
 
         let mut requests = requests.into_iter();
+        let mut prepared = Vec::with_capacity(ADMISSION_CHUNK);
+        let mut idle = Vec::with_capacity(ADMISSION_CHUNK);
         loop {
             // Authorize each request before admission, outside the queue lock.
             // Limit the number of commands admitted in one critical section.
-            let prepared: Vec<_> = requests
-                .by_ref()
-                .take(8)
-                .map(|request| self.authorize(request).map(Submission::new))
-                .collect();
+            prepared.extend(
+                requests
+                    .by_ref()
+                    .take(ADMISSION_CHUNK)
+                    .map(|request| self.authorize(request).map(Submission::new)),
+            );
             if prepared.is_empty() {
                 break;
             }
@@ -481,18 +485,19 @@ impl Broker {
             let previous = state.queue.len();
             results.extend(
                 prepared
-                    .into_iter()
+                    .drain(..)
                     .map(|result| result.and_then(|submission| state.enqueue(submission))),
             );
             let added = state.queue.len() - previous;
-            let idle: Vec<_> = state
-                .sleeping
-                .iter_mut()
-                .filter_map(Option::take)
-                .take(added)
-                .collect();
+            idle.extend(
+                state
+                    .sleeping
+                    .iter_mut()
+                    .filter_map(Option::take)
+                    .take(added),
+            );
             drop(state);
-            for waker in idle {
+            for waker in idle.drain(..) {
                 waker.wake();
             }
         }
@@ -503,6 +508,8 @@ impl Broker {
 struct Submission {
     request: Request,
     key: Option<Arc<Key>>,
+    sender: Sender<Delivery>,
+    receiver: Receiver<Delivery>,
 }
 
 impl Submission {
@@ -518,19 +525,28 @@ impl Submission {
                 reuse: reuse.clone(),
             })
         });
-        Self { request, key }
+        let (sender, receiver) = sync::channel();
+        Self {
+            request,
+            key,
+            sender,
+            receiver,
+        }
     }
 }
 
 impl State {
     fn enqueue(
         &mut self,
-        Submission { request, key }: Submission,
+        Submission {
+            request,
+            key,
+            sender,
+            receiver,
+        }: Submission,
     ) -> io::Result<Receiver<Delivery>> {
-        let (sender, receiver) = sync::channel();
         if let Some(delivery) = key.as_ref().and_then(|key| self.cache.get(key)) {
             // This receiver has not been returned or polled.
-
             let _ = sender.send(Delivery {
                 disposition: Disposition::Cached,
                 result: delivery,
