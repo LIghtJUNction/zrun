@@ -529,7 +529,7 @@ fn native_scripts_share_the_unix_broker_across_processes() {
     });
     fs::write(
         &file,
-        format!("# zrun:1\nasync action {request}\nawait action\n"),
+        format!("# zrun:1\nawait *\nasync zebra {request}\nasync alpha <<END\nprintf second\nEND\nawait *\n"),
     )
     .unwrap();
     let launch = || {
@@ -547,7 +547,7 @@ fn native_scripts_share_the_unix_broker_across_processes() {
     for child in [first, second] {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success(), "{:?}", output);
-        assert_eq!(output.stdout, b"remote");
+        assert_eq!(output.stdout, b"remotesecond");
     }
     assert_eq!(fs::read(directory.0.join("count")).unwrap(), b"x");
 }

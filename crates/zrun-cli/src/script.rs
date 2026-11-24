@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -42,7 +41,7 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
     if header.map(|(_, line)| line) != Some(HEADER) {
         return Err(invalid("missing # zrun:1 header"));
     }
-    let mut pending = BTreeSet::new();
+    let mut pending = Vec::new();
     let mut steps = Vec::new();
     while let Some((index, text)) = lines.next() {
         let fail = |reason: &str| invalid(format!("line {}: {reason}", index + 1));
@@ -58,11 +57,19 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
             .ok_or_else(|| fail("expected async, await or shell with arguments"))?;
         let rest = rest.trim_start();
         match operation {
+            "await" if rest == "*" => {
+                if steps.len() + pending.len() > 8192 {
+                    return Err(fail("too many script steps"));
+                }
+                steps.extend(pending.drain(..).map(|name: &str| Step::Await(name.into())));
+            }
             "await" => {
                 for name in rest.split_whitespace() {
-                    if !pending.remove(name) {
-                        return Err(fail("await requires the names of pending tasks"));
-                    }
+                    let slot = pending
+                        .iter()
+                        .position(|pending| *pending == name)
+                        .ok_or_else(|| fail("await requires the names of pending tasks"))?;
+                    pending.remove(slot);
                     if steps.len() == 8192 {
                         return Err(fail("too many script steps"));
                     }
@@ -79,9 +86,10 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
                     {
                         return Err(fail("invalid task name"));
                     }
-                    if pending.len() == 128 || !pending.insert(name) {
+                    if pending.len() == 128 || pending.contains(&name) {
                         return Err(fail("duplicate task name or 128 pending tasks"));
                     }
+                    pending.push(name);
                     (Some(name), payload.trim_start())
                 } else {
                     (None, rest)
@@ -120,10 +128,7 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
         }
     }
     if !pending.is_empty() {
-        return Err(invalid(format!(
-            "missing await for {}",
-            pending.into_iter().collect::<Vec<_>>().join(", ")
-        )));
+        return Err(invalid(format!("missing await for {}", pending.join(", "))));
     }
     Ok(steps)
 }
