@@ -18,6 +18,8 @@ use crate::{
 
 const MAX_WORKERS: usize = 256;
 const STEAL_LIMIT: usize = 8;
+const RETAINED_LIMIT: usize = 4;
+const RETAINED_TURNS: usize = 3;
 
 enum Arrival {
     Spawn,
@@ -34,7 +36,7 @@ thread_local! {
 #[derive(Default)]
 struct Worker {
     ready: Mutex<VecDeque<Arc<Task>>>,
-    retained: AtomicBool,
+    retained: AtomicUsize,
     parker: Arc<Parker>,
 }
 
@@ -94,24 +96,28 @@ impl SharedPool {
     fn next_task(
         &self,
         own: usize,
-        retained: &mut Option<Arc<Task>>,
-        prefer_retained: bool,
+        retained: &mut VecDeque<Arc<Task>>,
+        retained_turns: &mut usize,
     ) -> Option<Arc<Task>> {
         let worker = &self.workers[own];
         let pop_ready = || lock(&worker.ready).pop_front();
         let mut pop_retained = || {
-            let task = retained.take();
+            let task = retained.pop_front();
             if task.is_some() {
-                worker.retained.store(false, Ordering::Relaxed);
+                worker.retained.store(retained.len(), Ordering::Relaxed);
             }
             task
         };
-        let task = if prefer_retained {
-            pop_retained().or_else(pop_ready)
-        } else {
-            pop_ready().or_else(pop_retained)
-        };
-        task.or_else(|| self.steal(own))
+        if *retained_turns != 0
+            && let Some(task) = pop_retained()
+        {
+            *retained_turns -= 1;
+            return Some(task);
+        }
+        *retained_turns = RETAINED_TURNS;
+        pop_ready()
+            .or_else(pop_retained)
+            .or_else(|| self.steal(own))
     }
 
     fn steal(&self, own: usize) -> Option<Arc<Task>> {
@@ -177,22 +183,22 @@ impl SharedPool {
         CURRENT_WORKER.set(Some((identity, own)));
         let worker = &self.workers[own];
         let _driver = worker.parker.register();
-        let mut retained = None;
-        let mut prefer_retained = true;
+        let mut retained = VecDeque::new();
+        let mut retained_turns = RETAINED_TURNS;
         while !self.closed.load(Ordering::Acquire) {
             // The first worker owns timer turns. Other workers can register
             // timers concurrently and notify that worker's parker.
             if own == 0 {
                 self.clock.turn();
             }
-            let task = match self.next_task(own, &mut retained, prefer_retained) {
+            let task = match self.next_task(own, &mut retained, &mut retained_turns) {
                 Some(task) => task,
                 None => {
                     worker.parker.parking.arm();
                     if self.closed.load(Ordering::Acquire) {
                         break;
                     }
-                    let task = self.next_task(own, &mut retained, prefer_retained);
+                    let task = self.next_task(own, &mut retained, &mut retained_turns);
                     if task.is_none() {
                         if own == 0 {
                             match self.clock.next_timeout() {
@@ -209,19 +215,18 @@ impl SharedPool {
                     task
                 }
             };
-            prefer_retained = !prefer_retained;
             task.run_owned(INLINE_REPOLLS, |task| {
-                // The worker keeps at most one runnable that was already in
-                // its poll. Alternate with shared work to service arrivals.
-                if retained.is_none() {
-                    retained = Some(task);
-                    worker.retained.store(true, Ordering::Relaxed);
+                // Only continuations may be retained. Fresh arrivals keep a
+                // turn after each bounded set of local polls.
+                if retained.len() < RETAINED_LIMIT {
+                    retained.push_back(task);
+                    worker.retained.store(retained.len(), Ordering::Relaxed);
                 } else {
                     self.publish(task, own, true, Arrival::Wake);
                 }
             });
         }
-        worker.retained.store(false, Ordering::Relaxed);
+        worker.retained.store(0, Ordering::Relaxed);
     }
 }
 
@@ -378,9 +383,7 @@ impl Pool {
                 .shared
                 .workers
                 .iter()
-                .map(|worker| {
-                    lock(&worker.ready).len() + usize::from(worker.retained.load(Ordering::Relaxed))
-                })
+                .map(|worker| lock(&worker.ready).len() + worker.retained.load(Ordering::Relaxed))
                 .sum(),
             timer_entries: self.shared.clock.len(),
         }
