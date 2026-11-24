@@ -113,6 +113,8 @@ python3 scripts/agent-load.py --binary target/release/zrun --agents 1000 --round
 [批量命令的原始结果预算实测](measurements/mcp-capture-linux-20261124.md)
 
 
-Unix socket 的 HTTP/1.1 客户端可以发送 `Connection: keep-alive`，并在读完当前响应后在同一连接发送下一条请求。使用 `Content-Length` 定界，请求不可流水线发送。每条请求重新检查 Host、协议版本和授权，每条连接最多 64 次请求。响应头返回 `Connection: close` 时应重新连接；连接中断后，只有在确定请求可以安全重复时才应重试。
+Unix socket 和 TCP 的 HTTP/1.1 客户端可以发送 `Connection: keep-alive`，并在读完当前响应后在同一连接发送下一条请求。使用 `Content-Length` 定界，请求不可流水线发送。每条请求重新检查 Host、协议版本和授权，TCP 客户端每次都要发送 Bearer 令牌。每条连接最多 64 次请求。响应头返回 `Connection: close` 时应重新连接；连接中断后，只有在确定请求可以安全重复时才应重试。
 
 `zrun batch` 的远程模式和 `mcp --stdio` 的转发模式会在服务端确认后复用顺序连接。旧服务端返回 `Connection: close` 时，下一条请求会新建连接。上传或等待结果中断时，客户端报告错误并丢弃该连接。远程 `.zrun` 脚本也会复用空闲连接，单个脚本最多保留 8 条。并行 `async` 任务各自使用连接并独立收取结果。
+
+Linux 回环验证使用同一 release 二进制、四 worker 的 broker 和固定 CPU 的客户端，交替执行 12 对独立的 512 条 `tools/list` 请求。每条请求校验 HTTP 状态、响应 ID 和工具列表。显式复用时建立 8 条连接，逐条关闭时建立 512 条。耗时中位数分别为 65.5 ms 和 83.7 ms，配对比值为 0.783，95% 区间为 [0.761, 0.802]。该测试只覆盖顺序协议请求，不包含命令执行时间。

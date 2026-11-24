@@ -580,8 +580,7 @@ fn parse_headers(bytes: &[u8], access: &Access) -> Result<(Framing, bool), Statu
     {
         return Err(Status::UnsupportedMedia);
     }
-    let keep_alive = access.authorization.is_none()
-        && request.version == Some(1)
+    let keep_alive = request.version == Some(1)
         && get("Connection")?.is_some_and(|value| value.eq_ignore_ascii_case("keep-alive"));
     let transfer = get("Transfer-Encoding")?;
     let length_header = get("Content-Length")?;

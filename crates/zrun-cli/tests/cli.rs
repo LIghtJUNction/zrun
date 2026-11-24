@@ -1016,54 +1016,99 @@ fn unix_mcp_connection_can_reuse_the_stream_for_sequential_requests() {
         (2, "zrun", 200, true),
         (3, "other", 403, false),
     ] {
-        let body = serde_json::to_vec(&rpc(id, "tools/list", json!({}))).unwrap();
-        let stream = reader.get_mut();
-        write!(
-            stream,
-            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        ).unwrap();
-        stream.write_all(&body).unwrap();
-
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        assert_eq!(
-            line.split_ascii_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<u16>()
-                .unwrap(),
-            expected
-        );
-        let mut length = None;
-        let mut connection = None;
-        loop {
-            line.clear();
-            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            if line == "\r\n" {
-                break;
-            }
-            if let Some(value) = line.strip_prefix("Content-Length: ") {
-                length = Some(value.trim().parse::<usize>().unwrap());
-            }
-            if let Some(value) = line.strip_prefix("Connection: ") {
-                connection = Some(value.trim().to_string());
-            }
-        }
-        assert_eq!(
-            connection.as_deref(),
-            Some(if keep_open { "keep-alive" } else { "close" })
-        );
-        let mut response = vec![0; length.unwrap()];
-        reader.read_exact(&mut response).unwrap();
-        if keep_open {
-            assert_eq!(
-                serde_json::from_slice::<Value>(&response).unwrap()["id"],
-                id
-            );
-        }
+        check_sequential_post(&mut reader, id, host, "", expected, keep_open);
     }
     let mut remainder = Vec::new();
     reader.read_to_end(&mut remainder).unwrap();
     assert!(remainder.is_empty());
+}
+
+fn check_sequential_post(
+    reader: &mut BufReader<impl Read + Write>,
+    id: u32,
+    host: &str,
+    authorization: &str,
+    expected: u16,
+    keep_open: bool,
+) {
+    let body = serde_json::to_vec(&rpc(id, "tools/list", json!({}))).unwrap();
+    let stream = reader.get_mut();
+    write!(
+        stream,
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{authorization}\r\n",
+        body.len()
+    ).unwrap();
+    stream.write_all(&body).unwrap();
+
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(
+        line.split_ascii_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u16>()
+            .unwrap(),
+        expected
+    );
+    let mut length = None;
+    let mut connection = None;
+    loop {
+        line.clear();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            length = Some(value.trim().parse::<usize>().unwrap());
+        }
+        if let Some(value) = line.strip_prefix("Connection: ") {
+            connection = Some(value.trim().to_string());
+        }
+    }
+    assert_eq!(
+        connection.as_deref(),
+        Some(if keep_open { "keep-alive" } else { "close" })
+    );
+    let mut response = vec![0; length.unwrap()];
+    reader.read_exact(&mut response).unwrap();
+    if expected == 200 {
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response).unwrap()["id"],
+            id
+        );
+    }
+}
+
+#[test]
+fn tcp_mcp_keep_alive_rechecks_authentication_and_bounds_requests() {
+    let token = "test-authorization-secret-0123456789";
+    let (_server, mut stderr) = start(
+        zrun()
+            .args(["mcp", "--http", "127.0.0.1:0"])
+            .env("ZRUN_MCP_TOKEN", token),
+    );
+    let line = startup(&mut stderr);
+    let addr = line
+        .strip_prefix("zrun: http://")
+        .and_then(|address| address.strip_suffix("/mcp"))
+        .expect("bound TCP endpoint");
+    let connect = || {
+        let stream = TcpStream::connect(addr).expect("connect TCP client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        BufReader::new(stream)
+    };
+    let authorization = format!("Authorization: Bearer {token}\r\n");
+    let mut reader = connect();
+    check_sequential_post(&mut reader, 1, addr, &authorization, 200, true);
+    check_sequential_post(&mut reader, 2, addr, &authorization, 200, true);
+    check_sequential_post(&mut reader, 3, addr, "", 401, false);
+    assert!(reader.fill_buf().unwrap().is_empty());
+
+    let mut reader = connect();
+    for id in 1..=64 {
+        check_sequential_post(&mut reader, id, addr, &authorization, 200, id < 64);
+    }
+    assert!(reader.fill_buf().unwrap().is_empty());
 }
