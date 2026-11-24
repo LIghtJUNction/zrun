@@ -130,3 +130,68 @@ fn multi_worker_wakes_and_joins_keep_identity() {
         });
     }
 }
+
+#[test]
+fn retained_runnable_stays_visible_and_can_be_aborted() {
+    struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Gate {
+        fn new() -> Self {
+            Self(Arc::new((Mutex::new(false), Condvar::new())))
+        }
+
+        fn release(&self) {
+            let (released, changed) = &*self.0;
+            *released.lock().expect("release the fixture") = true;
+            changed.notify_all();
+        }
+
+        fn block_worker(&self, pool: &Pool) -> (zrun::JoinHandle<()>, mpsc::Receiver<()>) {
+            let gate = self.0.clone();
+            let (started, observer) = mpsc::channel();
+            let task = pool
+                .spawn(async move {
+                    started.send(()).expect("report poll entry");
+                    park_until_done(&gate);
+                })
+                .expect("admit a fixture task");
+            (task, observer)
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    let mut pool = Pool::new(1).expect("start one worker");
+    let initial = Gate::new();
+    let (first, first_started) = initial.block_worker(&pool);
+    first_started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("occupy the sole worker so both submissions are queued");
+    let pending = pool
+        .spawn(async {
+            loop {
+                yield_now().await
+            }
+        })
+        .expect("admit a repeatedly waking task");
+    let blocked = Gate::new();
+    let (second, second_started) = blocked.block_worker(&pool);
+    initial.release();
+    second_started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shared work gets a turn despite the retained runnable");
+    assert_eq!(pool.stats().queued_tasks, 1);
+    pending.abort();
+    blocked.release();
+
+    pool.block_on(first).expect("finish the first fixture");
+    pool.block_on(second).expect("finish the second fixture");
+    assert!(matches!(pool.block_on(pending), Err(JoinError::Cancelled)));
+    pool.shutdown();
+    assert_eq!(pool.stats().active_tasks, 0);
+    assert_eq!(pool.stats().queued_tasks, 0);
+}
