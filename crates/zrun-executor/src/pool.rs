@@ -290,11 +290,25 @@ impl SharedPool {
         }
     }
 
-    fn work(self: &Arc<Self>, own: usize) {
+    fn work(
+        self: &Arc<Self>,
+        own: usize,
+        #[cfg(feature = "io")] mut poller: Option<zrun_io::Poller>,
+    ) {
         let identity = Arc::as_ptr(self) as usize;
         CURRENT_WORKER.set(Some((identity, own)));
         let worker = &self.workers[own];
+        #[cfg(feature = "io")]
+        let _driver = match &poller {
+            Some(poller) => worker
+                .parker
+                .register_runner(crate::Runner::Io(thread::current().id(), poller.notifier())),
+            None => worker.parker.register(),
+        };
+        #[cfg(not(feature = "io"))]
         let _driver = worker.parker.register();
+        #[cfg(feature = "io")]
+        let mut io_budget = 32;
         let mut retained = VecDeque::new();
         let mut retained_turns = RETAINED_TURNS;
         while !self.closed.load(Ordering::Acquire) {
@@ -302,6 +316,17 @@ impl SharedPool {
             // timers concurrently and notify that worker's parker.
             if own == 0 {
                 self.clock.turn();
+            }
+            #[cfg(feature = "io")]
+            if let Some(poller) = &mut poller {
+                if io_budget == 0 {
+                    if poller.poll(Some(std::time::Duration::ZERO)).is_err() {
+                        self.close();
+                        break;
+                    }
+                    io_budget = 32;
+                }
+                io_budget -= 1;
             }
             let task = match self.next_task(own, &mut retained, &mut retained_turns) {
                 Some(task) => task,
@@ -312,6 +337,17 @@ impl SharedPool {
                     }
                     let task = self.next_task(own, &mut retained, &mut retained_turns);
                     if task.is_none() {
+                        #[cfg(feature = "io")]
+                        if let Some(poller) = &mut poller {
+                            let result = poller.poll(self.clock.next_timeout());
+                            worker.parker.parking.disarm();
+                            if result.is_err() {
+                                self.close();
+                                break;
+                            }
+                            io_budget = 32;
+                            continue;
+                        }
                         if own == 0 {
                             match self.clock.next_timeout() {
                                 Some(timeout) if timeout.is_zero() => {}
@@ -439,6 +475,36 @@ impl Pool {
     ///
     /// Returns an error for an invalid capacity or OS thread-creation failure.
     pub fn with_max_tasks(workers: usize, max_tasks: usize) -> io::Result<Self> {
+        Self::start(
+            workers,
+            max_tasks,
+            #[cfg(feature = "io")]
+            None,
+        )
+    }
+
+    /// Start the pool with a poller driven by its first worker.
+    ///
+    /// The returned handle registers descriptors on that worker's poller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid capacity, poller creation or worker creation error.
+    #[cfg(feature = "io")]
+    pub fn with_max_tasks_and_io(
+        workers: usize,
+        max_tasks: usize,
+    ) -> io::Result<(Self, zrun_io::Handle)> {
+        let poller = zrun_io::Poller::new()?;
+        let handle = poller.handle().clone();
+        Ok((Self::start(workers, max_tasks, Some(poller))?, handle))
+    }
+
+    fn start(
+        workers: usize,
+        max_tasks: usize,
+        #[cfg(feature = "io")] mut poller: Option<zrun_io::Poller>,
+    ) -> io::Result<Self> {
         if !(1..=MAX_WORKERS).contains(&workers) || max_tasks == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -472,9 +538,17 @@ impl Pool {
         };
         for index in 0..workers {
             let shared = pool.shared.clone();
+            #[cfg(feature = "io")]
+            let worker_poller = poller.take();
             let worker = thread::Builder::new()
                 .name(format!("zrun-worker-{index}"))
-                .spawn(move || shared.work(index))?;
+                .spawn(move || {
+                    shared.work(
+                        index,
+                        #[cfg(feature = "io")]
+                        worker_poller,
+                    );
+                })?;
             pool.workers.push(worker);
         }
         Ok(pool)

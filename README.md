@@ -56,7 +56,7 @@ cargo test --locked --test runtime one_million_tasks_have_no_loss -- --ignored -
 
 Project Z 开发机的 Cargo 命令必须进入仓库约定的单个外层共享构建锁；上面只展示标准 Cargo 参数。不要在已有锁内再次获取同一把锁。
 
-多线程场景可使用 `zrun::Pool::new(4)`，通过 `spawn` 或 `spawner` 提交任务，再用 `block_on` 等待结果。每个 worker 维护自己的就绪队列，闲置时可接手同池任务。现有 `Runtime` 继续使用单线程调用方式。
+多线程场景可使用 `zrun::Pool::new(4)`，通过 `spawn` 或 `spawner` 提交任务，再用 `block_on` 等待结果。每个 worker 维护自己的就绪队列，闲置时可接手同池任务。现有 `Runtime` 继续使用单线程调用方式。启用 `io` 后，`Pool::with_max_tasks_and_io` 返回 Pool 及其首个 worker 驱动的 I/O handle，可用来注册 TCP 和 Unix socket。
 
 ## 从 Future 到结果
 

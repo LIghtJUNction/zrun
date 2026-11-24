@@ -197,3 +197,56 @@ fn caller_driven_tcp_progresses_while_tasks_remain_runnable() {
             .is_cancelled()
     );
 }
+
+#[test]
+fn pool_driven_io_progresses_under_ready_work_and_closes_on_shutdown() {
+    use std::sync::atomic::AtomicBool;
+
+    let (mut pool, handle) = zrun::Pool::with_max_tasks_and_io(4, 32).unwrap();
+    let mut listener = handle.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let running = stop.clone();
+    let busy = pool
+        .spawn(async move {
+            while !running.load(Ordering::Acquire) {
+                zrun::yield_now().await;
+            }
+        })
+        .unwrap();
+    let echo = pool
+        .spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut bytes = [0; 5];
+            let mut received = 0;
+            while received < bytes.len() {
+                let count = stream.read(&mut bytes[received..]).await?;
+                if count == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                received += count;
+            }
+            stream.write_all(&bytes).await
+        })
+        .unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client.write_all(b"hello").unwrap();
+    let mut response = [0; 5];
+    let read = client.read_exact(&mut response);
+    stop.store(true, Ordering::Release);
+    read.unwrap();
+    assert_eq!(&response, b"hello");
+    pool.block_on(echo).unwrap().unwrap();
+    pool.block_on(busy).unwrap();
+    pool.shutdown();
+    assert_eq!(
+        handle
+            .bind("127.0.0.1:0".parse().unwrap())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}

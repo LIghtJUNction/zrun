@@ -22,6 +22,8 @@
 
 可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。分片版 Linux 回环 TCP 的 24 个指标格有 2 个过线，覆盖 8 worker 的两档往返 P99。更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/sharded-registry-linux-20261124.md)
 
+`Pool::with_max_tasks_and_io` 提供由首个 worker 直接驱动的 poller。它在连续执行任务期间也会检查 I/O，并与定时器共用休眠截止时间。Linux 四 worker TCP 回环已完成对照，命令服务以及其他规模和平台继续验收。[I/O worker 实测](measurements/p2-tcp-linux-20261124.md)
+
 ## P3：平台与优化
 
 实现并分别验证 macOS kqueue 与 Windows IOCP。根据 CPU profile 和内存数据优化任务布局、调度批量、偷取阈值和 timer 结构；每个优化都必须保留正确性门禁。完整 24 小时 soak 和跨平台 CI 结果进入正式发布决策。2026-11-23 用户已授权公开 P0 预览发行；完整正式版仍按上述性能、稳定性和平台门禁决定。

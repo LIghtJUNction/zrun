@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Barrier;
-use zrun::io::{Poller, Reactor, Stream};
+use zrun::io::{Poller, Stream};
 use zrun::{Pool, Runtime};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -191,9 +191,8 @@ fn serve_zrun(workers: usize, work: Workload) -> Result<()> {
             serve_native(listener, work, |stream| spawn.spawn(echo(stream, work))),
         )?
     } else {
-        let reactor = Reactor::new()?;
-        let listener = reactor.handle().bind(LOOPBACK)?;
-        let mut runtime = Pool::with_max_tasks(workers, work.connections)?;
+        let (mut runtime, io) = Pool::with_max_tasks_and_io(workers, work.connections)?;
+        let listener = io.bind(LOOPBACK)?;
         let spawn = runtime.spawner();
         ready(listener.local_addr()?)?;
         runtime.block_on(serve_native(listener, work, |stream| {
