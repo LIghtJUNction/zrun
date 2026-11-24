@@ -171,19 +171,42 @@ fn shell() -> PathBuf {
             .unwrap_or_else(|| OsString::from("cmd.exe"))
     };
     let selected = PathBuf::from(explicit.unwrap_or_else(fallback));
-    if selected == std::path::Path::new("zrun")
+    #[cfg(unix)]
+    let recursive = selects_self(&selected);
+    #[cfg(not(unix))]
+    let recursive = selected == std::path::Path::new("zrun")
         || env::current_exe().ok().is_some_and(|this| {
             selected
                 .canonicalize()
                 .is_ok_and(|candidate| candidate == this)
-        })
-    {
+        });
+    if recursive {
         #[cfg(unix)]
         return "/bin/sh".into();
         #[cfg(windows)]
         return "cmd.exe".into();
     }
     selected
+}
+
+#[cfg(unix)]
+fn selects_self(selected: &std::path::Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(this) = env::current_exe().and_then(std::fs::metadata) else {
+        return false;
+    };
+    let candidate = if selected.as_os_str().as_encoded_bytes().contains(&b'/') {
+        std::fs::metadata(selected).ok()
+    } else {
+        let path = env::var_os("PATH").unwrap_or_else(|| OsString::from("/bin:/usr/bin"));
+        env::split_paths(&path).find_map(|directory| {
+            let metadata = std::fs::metadata(directory.join(selected)).ok()?;
+            (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(metadata)
+        })
+    };
+    candidate
+        .is_some_and(|candidate| candidate.dev() == this.dev() && candidate.ino() == this.ino())
 }
 
 #[cfg(unix)]

@@ -581,3 +581,32 @@ fn mcp_batch_authorizes_each_request_before_reuse() {
             .contains("CallLimit")
     );
 }
+
+#[test]
+fn login_shell_forwards_command_and_exit_status() {
+    use std::os::unix::process::CommandExt;
+
+    let output = zrun()
+        .arg0("-zrun")
+        .args(["-c", "printf '%s' \"$1\"; exit 37", "fixture", "login"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(output.stdout, b"login");
+}
+
+#[test]
+fn shell_selection_handles_a_path_alias_back_to_zrun() {
+    let directory = Directory::new();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_zrun"), directory.0.join("login-alias"))
+        .unwrap();
+    let output = zrun()
+        .env_remove("ZRUN_SHELL")
+        .env("PATH", &directory.0)
+        .env("SHELL", "login-alias")
+        .args(["-c", "printf fallback"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"fallback");
+}
