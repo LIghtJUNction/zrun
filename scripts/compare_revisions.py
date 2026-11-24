@@ -111,6 +111,8 @@ def main():
             binary = getattr(args, variant).resolve()
             setattr(args, variant, binary)
             builds[variant] = build_receipt(getattr(args, f"{variant}_build"), binary)
+        if builds["baseline"]["binary_sha256"] == builds["candidate"]["binary_sha256"]:
+            raise ValueError("baseline and candidate are byte-identical")
         output = args.output.resolve()
         output.mkdir(parents=True, exist_ok=False)
         for variant in builds:
