@@ -121,7 +121,9 @@ def sample(args, out, pair, workers, case, engine):
     try:
         deadline = time.monotonic() + args.timeout
         workload = list(map(str, (*case, args.warmup)))
-        server = start([args.binary, "server", engine, str(workers), *workload],
+        server_binary = args.baseline if engine == "baseline" else args.binary
+        server_engine = "zrun" if engine == "baseline" else engine
+        server = start([server_binary, "server", server_engine, str(workers), *workload],
                        server_out, server_err, args.server_cpus)
         address = wait_ready(server, server_out, deadline)
         client = start([args.binary, "client", address, str(args.client_workers), *workload],
@@ -134,7 +136,7 @@ def sample(args, out, pair, workers, case, engine):
         if client.returncode != 0 or server.returncode != 0:
             raise ValueError(f"server status {server.returncode}, client status {client.returncode}")
         _, complete = bounded_read(server_out).splitlines()
-        record.update(validate_result(args, case, workers, engine,
+        record.update(validate_result(args, case, workers, server_engine,
                                       json.loads(bounded_read(client_out)), json.loads(complete)))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         record.update(status="failed", error=str(error))
@@ -147,6 +149,7 @@ def sample(args, out, pair, workers, case, engine):
 
 def summarize(args, samples):
     rows = []
+    opponent = "baseline" if args.baseline else "tokio"
     config = (
         ("tcp_bytes_per_second", "higher", 0.95, 1.20),
         ("tcp_rtt_p99_ns", "lower", 1.10, 0.80),
@@ -157,16 +160,20 @@ def summarize(args, samples):
                      and s["case"] == case and s["status"] == "ok"}
             for metric, direction, normal, challenge in config:
                 values = {engine: [found.get((i, engine), {}).get("metrics", {}).get(metric)
-                                   for i in range(args.rounds)] for engine in ("zrun", "tokio")}
+                                   for i in range(args.rounds)] for engine in ("zrun", opponent)}
                 seed = bench.stable_seed(args.seed, workers, case, metric)
+                if args.baseline:
+                    normal = challenge = 1.0
+                result = bench.compare_pairs(list(zip(values["zrun"], values[opponent])),
+                                             direction=direction, normal=normal, challenge=challenge,
+                                             expected=args.rounds, iterations=args.bootstrap, seed=seed,
+                                             release=all(s["profile"] == "release" for s in found.values()))
+                result["ratio_definition"] = f"median(zrun) / median({opponent})"
                 rows.append({
                     "workers": workers, "case": case, "metric": metric,
                     "engines": {engine: bench.describe(seq, args.bootstrap, seed)
                                 for engine, seq in values.items()},
-                    **bench.compare_pairs(list(zip(values["zrun"], values["tokio"])),
-                                          direction=direction, normal=normal, challenge=challenge,
-                                          expected=args.rounds, iterations=args.bootstrap, seed=seed,
-                                          release=all(s["profile"] == "release" for s in found.values())),
+                    **result,
                 })
     return rows
 
@@ -175,6 +182,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path, help="optional prior zrun TCP server binary")
     parser.add_argument("--workers", type=int, nargs="+", choices=bench.WORKERS, default=[1, 4])
     parser.add_argument("--client-workers", type=int, choices=bench.WORKERS, default=4)
     parser.add_argument("--case", type=parse_case, action="append", metavar="CONNECTIONS:PAYLOAD:ROUNDS")
@@ -190,6 +198,7 @@ def main():
             or not 100 <= args.bootstrap <= 100_000 or not 0 < args.timeout <= 3600):
         parser.error("warmup, rounds, bootstrap or timeout outside supported bounds")
     args.binary = args.binary.resolve()
+    opponent = "baseline" if args.baseline else "tokio"
     args.case = list(dict.fromkeys(args.case or DEFAULT_CASES))
     args.workers = list(dict.fromkeys(args.workers))
     try:
@@ -199,6 +208,10 @@ def main():
             raise ValueError("server and client affinities overlap")
         if not args.binary.is_file():
             raise ValueError(f"TCP comparator binary missing at {args.binary}")
+        if args.baseline:
+            args.baseline = args.baseline.resolve()
+            if not args.baseline.is_file():
+                raise ValueError(f"baseline binary missing at {args.baseline}")
         args.output.mkdir(parents=True, exist_ok=False)
     except (OSError, ValueError) as error:
         parser.error(str(error))
@@ -207,12 +220,14 @@ def main():
                          for key, value in vars(args).items()},
               "environment": bench.environment(args.binary), "samples": [], "status":"running",
               "cpu_ticks_per_second": os.sysconf("SC_CLK_TCK") if os.name == "posix" else None}
+    if args.baseline:
+        report["baseline_environment"] = bench.environment(args.baseline)
     path = args.output / "report.json"
     bench.atomic_json(path, report)
     for pair in range(args.rounds):
         for workers in args.workers:
             for case in args.case:
-                for engine in ("zrun", "tokio") if pair % 2 == 0 else ("tokio", "zrun"):
+                for engine in ("zrun", opponent) if pair % 2 == 0 else (opponent, "zrun"):
                     if bench.STOP_REQUESTED:
                         break
                     record = sample(args, args.output, pair, workers, case, engine)

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Barrier;
-use zrun::io::{Reactor, Stream};
+use zrun::io::{Poller, Reactor, Stream};
 use zrun::{Pool, Runtime};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -180,20 +180,22 @@ where
 }
 
 fn serve_zrun(workers: usize, work: Workload) -> Result<()> {
-    let reactor = Reactor::new()?;
-    let listener = reactor.handle().bind(LOOPBACK)?;
-    let address = listener.local_addr()?;
     if workers == 1 {
+        let mut poller = Poller::new()?;
+        let listener = poller.handle().bind(LOOPBACK)?;
         let mut runtime = Runtime::with_max_tasks(work.connections)?;
         let spawn = runtime.spawner();
-        ready(address)?;
-        runtime.block_on(serve_native(listener, work, |stream| {
-            spawn.spawn(echo(stream, work))
-        }))
+        ready(listener.local_addr()?)?;
+        runtime.block_on_with_io(
+            &mut poller,
+            serve_native(listener, work, |stream| spawn.spawn(echo(stream, work))),
+        )?
     } else {
+        let reactor = Reactor::new()?;
+        let listener = reactor.handle().bind(LOOPBACK)?;
         let mut runtime = Pool::with_max_tasks(workers, work.connections)?;
         let spawn = runtime.spawner();
-        ready(address)?;
+        ready(listener.local_addr()?)?;
         runtime.block_on(serve_native(listener, work, |stream| {
             spawn.spawn(echo(stream, work))
         }))

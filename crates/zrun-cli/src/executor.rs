@@ -1,13 +1,14 @@
 use std::future::Future;
 use std::io;
 
+use zrun::io::{Handle, Poller, Reactor};
 use zrun::{JoinHandle, Pool, PoolSpawner, Runtime, SpawnError, Timer};
 
 const MAX_WORKERS: usize = 16;
 
 pub(crate) enum Executor {
-    Current(Runtime),
-    Parallel(Pool),
+    Current(Runtime, Poller),
+    Parallel(Pool, Reactor),
 }
 
 impl Executor {
@@ -23,41 +24,48 @@ impl Executor {
             None => 1,
         };
         if workers == 1 {
-            Ok(Self::current())
+            Self::current()
         } else {
-            Pool::new(workers).map(Self::Parallel)
+            Ok(Self::Parallel(Pool::new(workers)?, Reactor::new()?))
         }
     }
 
-    pub(crate) fn current() -> Self {
-        Self::Current(Runtime::new())
+    pub(crate) fn current() -> io::Result<Self> {
+        Ok(Self::Current(Runtime::new(), Poller::new()?))
+    }
+
+    pub(crate) fn io(&self) -> &Handle {
+        match self {
+            Self::Current(_, poller) => poller.handle(),
+            Self::Parallel(_, reactor) => reactor.handle(),
+        }
     }
 
     pub(crate) fn timer(&self) -> Timer {
         match self {
-            Self::Current(runtime) => runtime.timer(),
-            Self::Parallel(runtime) => runtime.timer(),
+            Self::Current(runtime, _) => runtime.timer(),
+            Self::Parallel(runtime, _) => runtime.timer(),
         }
     }
 
     pub(crate) fn spawner(&self) -> Spawner {
         match self {
-            Self::Current(runtime) => Spawner::Current(runtime.spawner()),
-            Self::Parallel(runtime) => Spawner::Parallel(runtime.spawner()),
+            Self::Current(runtime, _) => Spawner::Current(runtime.spawner()),
+            Self::Parallel(runtime, _) => Spawner::Parallel(runtime.spawner()),
         }
     }
 
-    pub(crate) fn block_on<F: Future>(&mut self, future: F) -> F::Output {
+    pub(crate) fn block_on<F: Future>(&mut self, future: F) -> io::Result<F::Output> {
         match self {
-            Self::Current(runtime) => runtime.block_on(future),
-            Self::Parallel(runtime) => runtime.block_on(future),
+            Self::Current(runtime, poller) => runtime.block_on_with_io(poller, future),
+            Self::Parallel(runtime, _) => Ok(runtime.block_on(future)),
         }
     }
 
     pub(crate) fn shutdown(&mut self) {
         match self {
-            Self::Current(runtime) => runtime.shutdown(),
-            Self::Parallel(runtime) => runtime.shutdown(),
+            Self::Current(runtime, _) => runtime.shutdown(),
+            Self::Parallel(runtime, _) => runtime.shutdown(),
         }
     }
 }

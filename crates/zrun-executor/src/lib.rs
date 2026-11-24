@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::Duration;
 
 use zrun_task::{JoinHandle, Scheduler, Task};
 use zrun_time::{Driver, Timer};
@@ -63,8 +64,31 @@ pub struct RuntimeStats {
 
 #[derive(Default)]
 struct Parker {
-    runner: Mutex<Option<Thread>>,
+    runner: Mutex<Option<Runner>>,
     parking: ParkingFlag,
+}
+
+#[derive(Clone)]
+enum Runner {
+    Thread(Thread),
+    #[cfg(feature = "io")]
+    Io(thread::ThreadId, zrun_io::PollNotifier),
+}
+
+impl Runner {
+    fn wake(&self) {
+        match self {
+            Self::Thread(thread) => thread.unpark(),
+            // A caller-driven poll batch dispatches after returning from the
+            // OS wait. Wakers invoked on this thread need no second signal.
+            #[cfg(feature = "io")]
+            Self::Io(owner, notifier) if *owner != thread::current().id() => {
+                let _ = notifier.wake();
+            }
+            #[cfg(feature = "io")]
+            Self::Io(..) => {}
+        }
+    }
 }
 
 impl Parker {
@@ -76,17 +100,21 @@ impl Parker {
         if !self.parking.notify() {
             return false;
         }
-        let thread = { lock(&self.runner).clone() };
-        if let Some(thread) = thread {
-            thread.unpark();
+        let runner = { lock(&self.runner).clone() };
+        if let Some(runner) = runner {
+            runner.wake();
         }
         true
     }
 
     fn register(self: &Arc<Self>) -> RunnerGuard {
+        self.register_runner(Runner::Thread(thread::current()))
+    }
+
+    fn register_runner(self: &Arc<Self>, target: Runner) -> RunnerGuard {
         let mut runner = lock(&self.runner);
         assert!(runner.is_none(), "runtime already has a driving thread");
-        *runner = Some(thread::current());
+        *runner = Some(target);
         RunnerGuard(self.clone())
     }
 }
@@ -328,6 +356,41 @@ impl Runtime {
     /// or an independent root future; spawn and timer admission remain closed.
     pub fn block_on<F: Future>(&mut self, future: F) -> F::Output {
         let _runner = self.shared.parker.register();
+        self.drive(future, |timeout| {
+            match timeout {
+                Some(timeout) if timeout.is_zero() => {}
+                Some(timeout) => thread::park_timeout(timeout),
+                None => thread::park(),
+            }
+            Ok(())
+        })
+        .expect("thread parking is infallible")
+    }
+
+    /// Drive a root future, timers and sockets on the calling thread.
+    ///
+    /// The poller stays usable after this method returns. Sockets registered
+    /// with it advance whenever the caller drives it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS error if polling the kernel fails.
+    #[cfg(feature = "io")]
+    pub fn block_on_with_io<F: Future>(
+        &mut self,
+        poller: &mut zrun_io::Poller,
+        future: F,
+    ) -> std::io::Result<F::Output> {
+        let target = Runner::Io(thread::current().id(), poller.notifier());
+        let _runner = self.shared.parker.register_runner(target);
+        self.drive(future, |timeout| poller.poll(timeout))
+    }
+
+    fn drive<F: Future>(
+        &mut self,
+        future: F,
+        mut wait: impl FnMut(Option<Duration>) -> std::io::Result<()>,
+    ) -> std::io::Result<F::Output> {
         let signal = Arc::new(RootSignal {
             notified: AtomicBool::new(true),
             parker: self.shared.parker.clone(),
@@ -340,7 +403,7 @@ impl Runtime {
             if signal.notified.swap(false, Ordering::AcqRel)
                 && let Poll::Ready(value) = future.as_mut().poll(&mut cx)
             {
-                return value;
+                return Ok(value);
             }
 
             for _ in 0..TASK_TURN_BUDGET {
@@ -362,14 +425,14 @@ impl Runtime {
             self.shared.parker.parking.arm();
             if signal.notified.load(Ordering::Acquire) || self.shared.has_ready() {
                 self.shared.parker.parking.disarm();
+                // During sustained runnable work, also collect any I/O that
+                // has become ready, without blocking the next task turn.
+                wait(Some(Duration::ZERO))?;
                 continue;
             }
-            match self.driver.next_timeout() {
-                Some(timeout) if timeout.is_zero() => {}
-                Some(timeout) => thread::park_timeout(timeout),
-                None => thread::park(),
-            }
+            let result = wait(self.driver.next_timeout());
             self.shared.parker.parking.disarm();
+            result?;
             // Spurious returns and old unpark tokens are harmless: every turn
             // rechecks root readiness, task admission and timer deadlines.
         }

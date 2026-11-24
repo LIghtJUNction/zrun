@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -353,4 +353,61 @@ fn chunked_socket_requests_and_graceful_shutdown() {
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
     assert!(server.0.wait().expect("wait for daemon shutdown").success());
     assert!(!sock.exists());
+}
+
+#[test]
+fn default_socket_uses_the_private_xdg_directory() {
+    let directory = Directory::new();
+    let service = directory.0.join("zrun");
+    let socket = service.join("mcp.sock");
+    let (mut server, mut stderr) = start(
+        zrun()
+            .env("XDG_RUNTIME_DIR", &directory.0)
+            .args(["mcp", "--socket"]),
+    );
+    assert_eq!(
+        startup(&mut stderr),
+        format!("zrun: unix:{}", socket.display())
+    );
+    assert_eq!(
+        service.metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        socket.symlink_metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let duplicate = zrun()
+        .env("XDG_RUNTIME_DIR", &directory.0)
+        .args(["mcp", "--unix"])
+        .output()
+        .expect("try to start a second daemon");
+    assert!(!duplicate.status.success());
+    let connection = UnixStream::connect(&socket).expect("original socket still accepts clients");
+    connection
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (status, reply) = post(connection, "zrun", "", &rpc(1, "ping", Value::Null));
+    assert_eq!(status, 200);
+    assert_eq!(reply["id"], 1);
+
+    let pid = i32::try_from(server.0.id()).expect("Linux child PID fits i32");
+    // SAFETY: this is the live server child owned by the fixture.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    assert!(server.0.wait().expect("wait for daemon shutdown").success());
+    assert!(!socket.exists());
+}
+
+#[test]
+fn default_socket_refuses_a_shared_runtime_directory() {
+    let directory = Directory::new();
+    fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = zrun()
+        .env("XDG_RUNTIME_DIR", &directory.0)
+        .args(["mcp", "--unix"])
+        .output()
+        .expect("reject insecure runtime directory");
+    assert!(!output.status.success());
+    assert!(!directory.0.join("zrun").exists());
 }

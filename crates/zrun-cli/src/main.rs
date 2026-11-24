@@ -24,13 +24,14 @@ const HELP: &str = "Usage:
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
   zrun batch                      Run a batch of command objects from JSONL stdin
-  zrun mcp [--stdio | --http ADDRESS [--unix PATH] | --unix PATH]
+  zrun mcp [--stdio | --http ADDRESS [--unix [PATH]] | --unix [PATH]]
   zrun --zmem CLASS [COMMAND...]  Run zrun and its child commands in one zmem scope
   zrun --help
   zrun --version
 
 ZRUN_SHELL selects the shell executable, followed by SHELL on Unix.
-ZRUN_WORKERS selects the worker count for the managed runtime.";
+ZRUN_WORKERS selects the worker count for the managed runtime.
+--unix without PATH uses $XDG_RUNTIME_DIR/zrun/mcp.sock.";
 
 fn main() -> ExitCode {
     match run() {

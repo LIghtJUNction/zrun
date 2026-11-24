@@ -5,8 +5,6 @@ use std::pin::pin;
 use std::task::Poll;
 
 use serde_json::{Value, json};
-use zrun::Runtime;
-use zrun::io::Reactor;
 
 use crate::execution::{Broker, Delivery, Request};
 use crate::executor::Executor;
@@ -37,11 +35,11 @@ pub(crate) fn serve(
     let mut tcp = None;
     let mut unix = None;
     while let Some(option) = args.next() {
-        let value = args.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "missing transport address")
-        })?;
         match option.to_str() {
             Some("--http") if tcp.is_none() => {
+                let value = args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "missing HTTP address")
+                })?;
                 tcp = Some(
                     value
                         .to_str()
@@ -54,30 +52,42 @@ pub(crate) fn serve(
                         })?,
                 );
             }
-            Some("--unix") if unix.is_none() => unix = Some(PathBuf::from(value)),
+            Some("--unix" | "--socket") if unix.is_none() => {
+                let path = if args
+                    .peek()
+                    .is_some_and(|value| !value.as_encoded_bytes().starts_with(b"-"))
+                {
+                    args.next().map(PathBuf::from)
+                } else {
+                    None
+                };
+                unix = Some(path);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "expected --http ADDRESS or --unix PATH",
+                    "expected --http ADDRESS or --unix [PATH]",
                 ));
             }
         }
     }
+    let unix = unix
+        .map(|path| path.map_or_else(http::default_socket_path, Ok))
+        .transpose()?;
     http::serve(shell, tcp, unix)
 }
 
 fn serve_stdio(shell: PathBuf) -> io::Result<()> {
     let socket = std::env::var_os("ZRUN_SOCKET").map(PathBuf::from);
     let mut runtime = if socket.is_some() {
-        Executor::current()
+        Executor::current()?
     } else {
         Executor::configured()?
     };
-    let reactor = Reactor::new()?;
     let broker = if socket.is_none() {
         Some(Broker::new(
             shell,
-            reactor.handle(),
+            runtime.io(),
             runtime.timer(),
             &runtime.spawner(),
         )?)
@@ -85,6 +95,7 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
         None
     };
     let timer = runtime.timer();
+    let io = runtime.io().clone();
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut line = Vec::new();
@@ -103,13 +114,13 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
             ));
         }
         let response = if let Some(path) = &socket {
-            runtime.block_on(http::post(reactor.handle(), path, &line, &timer))?
+            runtime.block_on(http::post(&io, path, &line, &timer))??
         } else {
             runtime
                 .block_on(respond(
                     broker.as_ref().expect("local stdio has a broker"),
                     &line,
-                ))
+                ))?
                 .map(|value| serde_json::to_vec(&value))
                 .transpose()?
         };
@@ -311,8 +322,8 @@ pub(crate) fn run_remote(
                 .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
         );
     }
-    let mut runtime = Runtime::new();
-    let reactor = Reactor::new()?;
+    let mut runtime = Executor::current()?;
+    let io = runtime.io().clone();
     let timer = runtime.timer();
     runtime.block_on(async {
         let mut offset = 0;
@@ -332,7 +343,7 @@ pub(crate) fn run_remote(
                 }
                 count /= 2;
             };
-            let response = http::post(reactor.handle(), &path, &payload, &timer).await?
+            let response = http::post(&io, &path, &payload, &timer).await?
                 .ok_or_else(|| io::Error::other("missing command response"))?;
             let mut response: Value = serde_json::from_slice(&response)?;
             if let Some(error) = response.get("error") {
@@ -350,5 +361,5 @@ pub(crate) fn run_remote(
             offset += count;
         }
         Ok(())
-    })
+    })?
 }

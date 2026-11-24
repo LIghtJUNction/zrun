@@ -15,7 +15,7 @@ members = ["crates/zrun-task", "crates/zrun-executor", "crates/zrun-time", "crat
 default-members = [".", "crates/zrun-cli"]
 
 [features]
-io = ["dep:zrun-io"]
+io = ["dep:zrun-io", "zrun-executor/io"]
 
 [dependencies]
 zrun-executor = { path = "crates/zrun-executor" }

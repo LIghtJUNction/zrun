@@ -1,7 +1,7 @@
 //! Readiness-driven sockets and Unix file descriptors for Rust futures.
 //!
-//! One reactor thread waits for kernel events. I/O and application futures are
-//! polled by their caller's executor. Registration IDs are never reused within
+//! Use a dedicated reactor thread or let an executor drive the poller. I/O and
+//! application futures run on the caller's executor. IDs are never reused within
 //! a reactor, so events already returned by the kernel cannot target a later fd.
 
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use std::net::{Shutdown, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use mio::event::Source;
 use mio::net::{TcpListener, TcpStream};
@@ -77,17 +78,8 @@ impl Reactor {
     ///
     /// Returns an OS error if the poller or its thread cannot be created.
     pub fn new() -> io::Result<Self> {
-        let mut poll = mio::Poll::new()?;
-        let shared = Arc::new(Shared {
-            registry: poll.registry().try_clone()?,
-            stop: mio::Waker::new(poll.registry(), SHUTDOWN)?,
-            registrations: Mutex::new(Registrations {
-                closed: false,
-                next_token: 1,
-                waiters: HashMap::new(),
-            }),
-        });
-        let handle = Handle(shared.clone());
+        let (mut poll, handle) = open_poller()?;
+        let shared = handle.0.clone();
         let thread = thread::Builder::new()
             .name("zrun-io".into())
             .spawn(move || {
@@ -109,9 +101,103 @@ impl Reactor {
 impl Drop for Reactor {
     fn drop(&mut self) {
         let _ = self.handle.0.stop.wake();
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take()
+            && thread.thread().id() != thread::current().id()
+        {
             let _ = thread.join();
         }
+    }
+}
+
+fn open_poller() -> io::Result<(mio::Poll, Handle)> {
+    let poll = mio::Poll::new()?;
+    let shared = Arc::new(Shared {
+        registry: poll.registry().try_clone()?,
+        stop: mio::Waker::new(poll.registry(), SHUTDOWN)?,
+        registrations: Mutex::new(Registrations {
+            closed: false,
+            next_token: 1,
+            waiters: HashMap::new(),
+        }),
+    });
+    Ok((poll, Handle(shared)))
+}
+
+/// Kernel poller that is driven directly by its caller.
+#[derive(Debug)]
+pub struct Poller {
+    poll: mio::Poll,
+    events: Events,
+    handle: Handle,
+}
+
+impl Poller {
+    /// Create a poller without spawning a background thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS error if the poller or notifier cannot be created.
+    pub fn new() -> io::Result<Self> {
+        let (poll, handle) = open_poller()?;
+        Ok(Self {
+            poll,
+            events: Events::with_capacity(256),
+            handle,
+        })
+    }
+
+    /// Borrow the handle used to register sockets and descriptors.
+    pub fn handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Create a notifier that interrupts a current or upcoming poll.
+    pub fn notifier(&self) -> PollNotifier {
+        PollNotifier(self.handle.0.clone())
+    }
+
+    /// Dispatch one kernel event batch, waiting up to the supplied timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS error if the kernel poll fails. An interrupt returns early
+    /// so the caller can recompute work and deadlines before polling again.
+    pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        match self.poll.poll(&mut self.events, timeout) {
+            Ok(()) => {
+                dispatch_events(&self.events, &self.handle.0);
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        close_waiters(&self.handle.0);
+    }
+}
+
+/// A cross-thread wake source for a caller-driven poller.
+#[derive(Clone)]
+pub struct PollNotifier(Arc<Shared>);
+
+impl fmt::Debug for PollNotifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PollNotifier").finish_non_exhaustive()
+    }
+}
+
+impl PollNotifier {
+    /// Interrupt the poller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS error if the notification cannot be sent.
+    pub fn wake(&self) -> io::Result<()> {
+        self.0.stop.wake()
     }
 }
 
@@ -476,31 +562,40 @@ fn dispatch(poll: &mut mio::Poll, shared: &Shared) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         }
-        for event in &events {
-            if event.token() == SHUTDOWN {
-                return;
-            }
-            let waiters = shared
-                .registrations
-                .lock()
-                .expect("registrations poisoned")
-                .waiters
-                .get(&event.token())
-                .cloned();
-            if let Some(waiters) = waiters {
-                let (read, write) = {
-                    let mut waiters = waiters.lock().expect("readiness waiters poisoned");
-                    let read = event.is_readable() || event.is_read_closed() || event.is_error();
-                    let write = event.is_writable() || event.is_write_closed() || event.is_error();
-                    (
-                        read.then(|| waiters.read.take()).flatten(),
-                        write.then(|| waiters.write.take()).flatten(),
-                    )
-                };
-                wake_waiters(read, write);
-            }
+        if dispatch_events(&events, shared) {
+            return;
         }
     }
+}
+
+fn dispatch_events(events: &Events, shared: &Shared) -> bool {
+    let mut notified = false;
+    for event in events {
+        if event.token() == SHUTDOWN {
+            notified = true;
+            continue;
+        }
+        let waiters = shared
+            .registrations
+            .lock()
+            .expect("registrations poisoned")
+            .waiters
+            .get(&event.token())
+            .cloned();
+        if let Some(waiters) = waiters {
+            let (read, write) = {
+                let mut waiters = waiters.lock().expect("readiness waiters poisoned");
+                let read = event.is_readable() || event.is_read_closed() || event.is_error();
+                let write = event.is_writable() || event.is_write_closed() || event.is_error();
+                (
+                    read.then(|| waiters.read.take()).flatten(),
+                    write.then(|| waiters.write.take()).flatten(),
+                )
+            };
+            wake_waiters(read, write);
+        }
+    }
+    notified
 }
 
 fn close_waiters(shared: &Shared) {

@@ -11,6 +11,3 @@ mio = { version = "1.2", features = ["net", "os-poll", "os-ext"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-zrun-executor = { path = "../zrun-executor" }

@@ -1,13 +1,13 @@
 use std::io;
 use std::net::SocketAddr;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use zrun::Timer;
-use zrun::io::{Listener, Reactor, Stream, UnixListener};
+use zrun::io::{Listener, Stream, UnixListener};
 
 use super::{MAX_MESSAGE, deadline, respond, supports_protocol};
 use crate::execution::Broker;
@@ -23,12 +23,11 @@ pub(super) fn serve(
     unix: Option<PathBuf>,
 ) -> io::Result<()> {
     let (signals, mut shutdown) = Signals::new()?;
-    let runtime = Executor::configured()?;
-    let reactor = Reactor::new()?;
+    let mut runtime = Executor::configured()?;
     let timer = runtime.timer();
     let broker = Arc::new(Broker::new(
         shell,
-        reactor.handle(),
+        runtime.io(),
         timer.clone(),
         &runtime.spawner(),
     )?);
@@ -46,7 +45,7 @@ pub(super) fn serve(
             .ok_or_else(|| {
                 invalid("set ZRUN_MCP_TOKEN to a secret of at least 32 printable characters")
             })?;
-        let listener = reactor.handle().bind(addr)?;
+        let listener = runtime.io().bind(addr)?;
         let bound = listener.local_addr()?;
         listeners.push((
             Endpoint::Tcp(listener),
@@ -59,7 +58,7 @@ pub(super) fn serve(
     }
     if let Some(path) = unix {
         validate_directory(&path)?;
-        let listener = reactor.handle().bind_unix(&path)?;
+        let listener = runtime.io().bind_unix(&path)?;
         socket_path = Some(SocketPath::new(path)?);
         listeners.push((
             Endpoint::Unix(listener),
@@ -92,7 +91,6 @@ pub(super) fn serve(
                 .map_err(io::Error::other)?,
         );
     }
-    let mut runtime = runtime;
     let result = runtime.block_on(std::future::poll_fn(|cx| {
         if std::pin::Pin::new(&mut shutdown).poll(cx).is_ready() {
             return std::task::Poll::Ready(Ok(()));
@@ -109,7 +107,7 @@ pub(super) fn serve(
     runtime.shutdown();
     drop(socket_path);
     drop(signals);
-    result
+    result?
 }
 
 use std::future::Future;
@@ -519,15 +517,42 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+pub(super) fn default_socket_path() -> io::Result<PathBuf> {
+    let root = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            invalid("set XDG_RUNTIME_DIR to an absolute private directory or pass --unix PATH")
+        })?;
+    check_private_directory(&root)?;
+    let directory = root.join("zrun");
+    match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if directory.symlink_metadata()?.is_symlink() {
+        return Err(invalid(
+            "default Unix socket directory must be a directory, not a symlink",
+        ));
+    }
+    check_private_directory(&directory)?;
+    Ok(directory.join("mcp.sock"))
+}
+
 fn validate_directory(path: &Path) -> io::Result<()> {
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let metadata = directory.metadata()?;
+    check_private_directory(directory)
+}
+
+fn check_private_directory(path: &Path) -> io::Result<()> {
+    let metadata = path.metadata()?;
     // SAFETY: geteuid has no arguments and does not mutate process state.
     let uid = unsafe { libc::geteuid() };
-    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
         return Err(invalid(
             "Unix socket directory must belong to the user and have mode 0700",
         ));

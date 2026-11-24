@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use zrun::Timer;
-use zrun::io::{Handle, Reactor};
+use zrun::io::Handle;
 use zrun::sync::{self, Receiver, Sender};
 
 use crate::executor::{Executor, Spawner};
@@ -437,7 +437,6 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
 pub(crate) struct Batch {
     runtime: Executor,
     broker: Broker,
-    _reactor: Reactor,
 }
 
 impl Batch {
@@ -445,13 +444,8 @@ impl Batch {
 
     pub(crate) fn new(shell: PathBuf) -> io::Result<Self> {
         let runtime = Executor::configured()?;
-        let reactor = Reactor::new()?;
-        let broker = Broker::new(shell, reactor.handle(), runtime.timer(), &runtime.spawner())?;
-        Ok(Self {
-            runtime,
-            broker,
-            _reactor: reactor,
-        })
+        let broker = Broker::new(shell, runtime.io(), runtime.timer(), &runtime.spawner())?;
+        Ok(Self { runtime, broker })
     }
 
     pub(crate) fn execute(
@@ -493,6 +487,6 @@ impl Batch {
                 let (index, _) = running.swap_remove(slot);
                 record(index, delivery.map_err(io::Error::other)?)?;
             }
-        })
+        })?
     }
 }

@@ -557,6 +557,7 @@ name = "zrun-executor"
 version = "0.1.0-p0.2"
 dependencies = [
  "loom",
+ "zrun-io",
  "zrun-sync",
  "zrun-task",
  "zrun-time",
@@ -568,7 +569,6 @@ version = "0.1.0-p0.2"
 dependencies = [
  "libc",
  "mio",
- "zrun-executor",
 ]
 
 [[package]]
