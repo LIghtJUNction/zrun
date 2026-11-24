@@ -15,7 +15,7 @@
 
 zharness 当前核心是 no_std、调用方提供缓冲区和时钟的同步状态机，本身没有异步执行器；它需要的是面向 std 应用的可选运行适配，而不是让基础状态机强制分配任务、启动线程。这里的 Executor 指工具调用接口，与 Rust Future 调度器是两个职责。
 
-ssmcp 当前使用 Tokio 的网络、TLS/WebSocket、进程、信号、文件、同步与时间能力。P0 zrun 只有单线程调度和时间队列，没有这些系统驱动。逐步迁移时可以暂时让两个运行域并存，但必须通过有界消息交接结果，不能在 zrun 内轮询依赖 Tokio reactor 的 Future，也不能把 Tokio 的线程本地运行时上下文假定为全局可用。
+ssmcp 当前使用 Tokio 的网络、TLS/WebSocket、进程、信号、文件、同步与时间能力。P0 核心提供单线程调度和时间队列。新增的可选 I/O 模块提供 TCP 和 Unix socket，Linux 命令服务另提供受管进程执行。上层项目也可直接通过 [Unix socket 协议](agent-shell.md) 访问命令队列。逐步迁移时可以暂时让两个运行域并存，但必须通过有界消息交接结果，不能在 zrun 内轮询依赖 Tokio reactor 的 Future，也不能把 Tokio 的线程本地运行时上下文假定为全局可用。
 
 ## 第一个可交付的公共能力：有界阻塞收尾
 

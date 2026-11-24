@@ -1,0 +1,16 @@
+[package]
+name = "zrun-io"
+version = "0.1.0-p0.2"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+publish = false
+
+[dependencies]
+mio = { version = "1.2", features = ["net", "os-poll", "os-ext"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+zrun-executor = { path = "../zrun-executor" }

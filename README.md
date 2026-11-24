@@ -1,10 +1,24 @@
 # zrun
 
-zrun 是一个独立的 Rust async runtime。当前阶段是 **P0：单线程调度器、任务生命周期、定时器和结果通道**。它自己决定何时 poll Future、如何保存 wake、如何取消和关闭任务；运行时不调用 Tokio 的调度器。Tokio 只用于独立比较程序。
+zrun 提供独立的 Rust 异步运行时和面向 AI agent 的 Linux 命令执行服务。终端、批量脚本和 MCP 客户端可以向同一个进程提交命令。服务为可复用命令合并并发请求，缓存有明确输入版本的成功结果，并限制进程数、排队字节数和输出大小。
+
+运行时的长期目标是成为 Tokio 的替代选项。当前核心提供 **P0 单线程调度器、任务生命周期、定时器和结果通道**，另外通过 `io` feature 提供异步 TCP、Unix socket 和 Unix 文件描述符。Tokio 位于独立比较程序，多线程运行时和性能门槛见[阶段计划](docs/plan.md)。
 
 当前发行是 **0.1.0-p0.1 预览版**，提供可复现源码与验证流程。性能目标仍是后续验收条件；首次测量尚未达到这些目标。参见 [发行说明](docs/releases/0.1.0-p0.1.md)。
 
 本工作副本正在验证 **0.1.0-p0.2 候选版**，尚未发布或部署。它保留休眠通知优化，并将活动任务登记改为连续引用数组；索引、对象身份和关闭边界见 [任务登记设计](docs/task-registry.md)，实际结果见 [候选说明](docs/releases/0.1.0-p0.2.md)。
+
+## 执行命令
+
+构建 Linux CLI 后，直接运行 `zrun` 进入环境中配置的 shell。`zrun run` 执行一条受管命令，`zrun batch` 从 stdin 读取 JSONL 并发执行。多个进程可以用 `ZRUN_SOCKET` 接入同一个本地队列。
+
+```sh
+cargo build --locked --release -p zrun-cli
+target/release/zrun
+target/release/zrun run 'printf "%s\n" ready'
+```
+
+[MCP、Unix socket、复用协议和 Project Z 集成](docs/agent-shell.md)
 
 ## 运行一个任务
 
@@ -78,8 +92,11 @@ zrun 是协作式调度器。一个从不返回的 Future::poll 会阻塞该执�
 | zrun-time | 定时器登记、到期唤醒和取消清理 |
 | zrun-sync | 任务结果所使用的同步原语 |
 | zrun-bench | 与 Tokio 的独立进程比较及持续运行工具 |
+| zrun-io | 可选的 TCP、Unix socket 和描述符就绪通知 |
+| zrun-cli | 交互 shell 入口、统一命令队列、MCP 和复用 |
+| zrun-plugin-api | zplugin 原生命令准入 ABI |
 
-核心模块只使用标准库与本仓库 path 依赖。比较程序的 Tokio 依赖不会把 Tokio 调度器引入 zrun 的执行路径。
+默认调度核心使用标准库与本仓库 path 依赖。可选 I/O 模块使用 Mio，应用中的授权、插件 ABI 和二进制输出复用 zguard、zplugin 和 z64。
 
 ## 验证与测量
 

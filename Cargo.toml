@@ -11,13 +11,18 @@ publish = false
 
 [workspace]
 resolver = "3"
-members = ["crates/zrun-task", "crates/zrun-executor", "crates/zrun-time", "crates/zrun-sync", "crates/zrun-bench"]
+members = ["crates/zrun-task", "crates/zrun-executor", "crates/zrun-time", "crates/zrun-sync", "crates/zrun-bench", "crates/zrun-io", "crates/zrun-cli", "crates/zrun-plugin-api"]
+default-members = [".", "crates/zrun-cli"]
+
+[features]
+io = ["dep:zrun-io"]
 
 [dependencies]
 zrun-executor = { path = "crates/zrun-executor" }
 zrun-task = { path = "crates/zrun-task" }
 zrun-time = { path = "crates/zrun-time" }
 zrun-sync = { path = "crates/zrun-sync" }
+zrun-io = { path = "crates/zrun-io", optional = true }
 
 [profile.dev]
 debug = 0
