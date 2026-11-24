@@ -516,3 +516,39 @@ fn native_script_reuses_an_explicit_key_and_validates_before_running() {
     assert!(!output.status.success());
     assert!(!dir.0.join("unexpected").exists());
 }
+
+#[test]
+fn native_scripts_share_the_unix_broker_across_processes() {
+    let directory = Directory::new();
+    let sock = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&sock).current_dir("/"));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let file = directory.0.join("remote.zrun");
+    let request = json!({
+        "script": "printf x >> count; sleep 0.1; printf remote",
+        "reuse": {"scope":"remote-fixture", "input_revision":"v1", "ttl_ms":5000}
+    });
+    fs::write(
+        &file,
+        format!("# zrun:1\nasync action {request}\nawait action\n"),
+    )
+    .unwrap();
+    let launch = || {
+        zrun()
+            .current_dir(&directory.0)
+            .env("ZRUN_SOCKET", &sock)
+            .arg(&file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let first = launch();
+    let second = launch();
+    for child in [first, second] {
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(output.stdout, b"remote");
+    }
+    assert_eq!(fs::read(directory.0.join("count")).unwrap(), b"x");
+}

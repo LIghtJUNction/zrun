@@ -120,33 +120,67 @@ fn emit(delivery: Delivery) -> io::Result<u8> {
 
 pub(crate) fn run(shell: PathBuf, source: &str) -> io::Result<u8> {
     let steps = parse(source)?;
-    // A .zrun program owns one local broker, including its policy and cache.
-    Batch::new(shell)?.drive(async move |broker| {
-        let mut pending = std::collections::BTreeMap::new();
-        let mut status = 0;
-        for step in steps {
-            let delivery = match step {
-                Step::Spawn(name, request) => {
-                    pending.insert(name, broker.submit(request).await);
-                    continue;
-                }
-                Step::Await(name) => pending.remove(&name).expect("validated await"),
-                Step::Shell(request) => broker.submit(request).await,
-            };
-            let delivery = match delivery {
-                Ok(ticket) => match ticket.await {
-                    Ok(delivery) => delivery,
-                    Err(error) => Delivery::rejected(io::Error::other(error)),
-                },
-                Err(error) => Delivery::rejected(error),
-            };
-            let code = emit(delivery)?;
-            if status == 0 {
-                status = code;
+    if let Some(path) = std::env::var_os("ZRUN_SOCKET") {
+        let path = std::sync::Arc::new(PathBuf::from(path));
+        let cwd = std::env::current_dir()?;
+        let mut runtime = crate::executor::Executor::current()?;
+        let spawner = runtime.spawner();
+        let io = runtime.io().clone();
+        let timer = runtime.timer();
+        runtime.block_on(execute(steps, async |mut request: Request| {
+            request.cwd = Some(
+                request
+                    .cwd
+                    .as_deref()
+                    .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
+            );
+            let (sender, receiver) = zrun::sync::channel();
+            let (io, path, timer) = (io.clone(), path.clone(), timer.clone());
+            spawner
+                .spawn(async move {
+                    let delivery = crate::mcp::remote_one(&io, &path, request, &timer)
+                        .await
+                        .unwrap_or_else(Delivery::rejected);
+                    let _ = sender.send(delivery);
+                })
+                .map_err(io::Error::other)?;
+            Ok(receiver)
+        }))?
+    } else {
+        Batch::new(shell)?.drive(async move |broker| {
+            execute(steps, async |request| broker.submit(request).await).await
+        })
+    }
+}
+
+async fn execute(
+    steps: Vec<Step>,
+    mut submit: impl AsyncFnMut(Request) -> io::Result<zrun::sync::Receiver<Delivery>>,
+) -> io::Result<u8> {
+    let mut pending = std::collections::BTreeMap::new();
+    let mut status = 0;
+    for step in steps {
+        let delivery = match step {
+            Step::Spawn(name, request) => {
+                pending.insert(name, submit(request).await);
+                continue;
             }
+            Step::Await(name) => pending.remove(&name).expect("validated await"),
+            Step::Shell(request) => submit(request).await,
+        };
+        let delivery = match delivery {
+            Ok(ticket) => match ticket.await {
+                Ok(delivery) => delivery,
+                Err(error) => Delivery::rejected(io::Error::other(error)),
+            },
+            Err(error) => Delivery::rejected(error),
+        };
+        let code = emit(delivery)?;
+        if status == 0 {
+            status = code;
         }
-        Ok(status)
-    })
+    }
+    Ok(status)
 }
 
 #[cfg(test)]

@@ -362,18 +362,7 @@ pub(crate) fn run_remote(
                 }
                 count /= 2;
             };
-            let response = http::post(&io, &path, &payload, &timer).await?
-                .ok_or_else(|| io::Error::other("missing command response"))?;
-            let mut response: Value = serde_json::from_slice(&response)?;
-            if let Some(error) = response.get("error") {
-                return Err(io::Error::other(format!("MCP command request failed: {error}")));
-            }
-            let records: Vec<Delivery> = serde_json::from_value(
-                response["result"]["structuredContent"]["commands"].take()
-            )?;
-            if records.len() != count || response.get("id").and_then(Value::as_u64) != Some(offset as u64) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected MCP command result"));
-            }
+            let records = remote_records(&io, &path, &payload, &timer, offset, count).await?;
             for (index, delivery) in records.into_iter().enumerate() {
                 record(offset + index, delivery)?;
             }
@@ -381,4 +370,46 @@ pub(crate) fn run_remote(
         }
         Ok(())
     })?
+}
+
+async fn remote_records(
+    io: &zrun::io::Handle,
+    path: &std::path::Path,
+    payload: &[u8],
+    timer: &zrun::Timer,
+    id: usize,
+    count: usize,
+) -> io::Result<Vec<Delivery>> {
+    let body = http::post(io, path, payload, timer)
+        .await?
+        .ok_or_else(|| io::Error::other("missing command response"))?;
+    let mut response: Value = serde_json::from_slice(&body)?;
+    if let Some(error) = response.get("error") {
+        return Err(io::Error::other(format!(
+            "MCP command request failed: {error}"
+        )));
+    }
+    let records: Vec<Delivery> =
+        serde_json::from_value(response["result"]["structuredContent"]["commands"].take())?;
+    if records.len() != count || response.get("id").and_then(Value::as_u64) != Some(id as u64) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected MCP command result",
+        ));
+    }
+    Ok(records)
+}
+
+pub(crate) async fn remote_one(
+    io: &zrun::io::Handle,
+    path: &std::path::Path,
+    request: Request,
+    timer: &zrun::Timer,
+) -> io::Result<Delivery> {
+    let payload = serde_json::to_vec(&json!({
+        "jsonrpc":"2.0", "id":0, "method":"tools/call",
+        "params":{"name":"shell_batch","arguments":{"commands":[request]}}
+    }))?;
+    let mut records = remote_records(io, path, &payload, timer, 0, 1).await?;
+    Ok(records.remove(0))
 }

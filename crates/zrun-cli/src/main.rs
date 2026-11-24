@@ -70,11 +70,6 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err("native .zrun programs do not take positional arguments".into());
             }
-            if env::var_os("ZRUN_SOCKET").is_some() {
-                return Err(
-                    "native .zrun programs currently use a local broker; unset ZRUN_SOCKET".into(),
-                );
-            }
             file.rewind()?;
             let mut source = String::new();
             file.take(execution::Batch::MAX_INPUT as u64 + 1)
