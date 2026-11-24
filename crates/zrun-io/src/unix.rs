@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 
@@ -62,9 +62,33 @@ pub enum Nonblocking {
     ReadinessOnly,
 }
 
-/// Owns a Unix descriptor and waits for read readiness through the reactor.
+/// Readiness the reactor should deliver for an owned Unix descriptor.
+#[derive(Clone, Copy, Debug)]
+pub enum FdInterest {
+    /// Read readiness, for example a child's stdout pipe.
+    Readable,
+    /// Write readiness, for example a child's stdin pipe.
+    Writable,
+    /// Both directions, for example a PTY master.
+    ReadWrite,
+}
+
+impl FdInterest {
+    fn interest(self) -> Interest {
+        match self {
+            Self::Readable => Interest::READABLE,
+            Self::Writable => Interest::WRITABLE,
+            Self::ReadWrite => Interest::READABLE | Interest::WRITABLE,
+        }
+    }
+}
+
+/// Owns a Unix descriptor registered with a reactor.
 #[derive(Debug)]
-pub struct AsyncFd<T: AsRawFd>(Registered<Descriptor<T>>);
+pub struct AsyncFd<T: AsRawFd> {
+    registered: Registered<Descriptor<T>>,
+    interest: Interest,
+}
 
 impl<T: AsRawFd> AsyncFd<T> {
     /// Take ownership of a descriptor and register it for read readiness.
@@ -73,10 +97,28 @@ impl<T: AsRawFd> AsyncFd<T> {
     ///
     /// Returns an OS error if the flags cannot be set or registration fails.
     pub fn new(handle: &Handle, fd: T, mode: Nonblocking) -> io::Result<Self> {
+        Self::with_interest(handle, fd, mode, FdInterest::Readable)
+    }
+
+    /// Take ownership of a descriptor with the specified readiness interest.
+    ///
+    /// # Errors
+    /// Returns an OS error if the flags cannot be set or registration fails.
+    pub fn with_interest(
+        handle: &Handle,
+        fd: T,
+        mode: Nonblocking,
+        interest: FdInterest,
+    ) -> io::Result<Self> {
         if matches!(mode, Nonblocking::Set) {
             set_nonblocking(fd.as_raw_fd())?;
         }
-        Registered::new(handle, Descriptor(fd), Interest::READABLE).map(Self)
+        let interest = interest.interest();
+        let registered = Registered::new(handle, Descriptor(fd), interest)?;
+        Ok(Self {
+            registered,
+            interest,
+        })
     }
 
     /// Retry a nonblocking operation whenever the descriptor becomes readable.
@@ -91,8 +133,34 @@ impl<T: AsRawFd> AsyncFd<T> {
         &mut self,
         mut operation: impl FnMut(&mut T) -> io::Result<U>,
     ) -> io::Result<U> {
-        self.0
+        if !self.interest.is_readable() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "descriptor is not registered for read readiness",
+            ));
+        }
+        self.registered
             .ready(Direction::Read, |fd| operation(&mut fd.0))
+            .await
+    }
+
+    /// Retry a nonblocking operation whenever the descriptor becomes writable.
+    ///
+    /// # Errors
+    /// Returns an operation or reactor error, or `InvalidInput` if write
+    /// readiness was not registered.
+    pub async fn writable<U>(
+        &mut self,
+        mut operation: impl FnMut(&mut T) -> io::Result<U>,
+    ) -> io::Result<U> {
+        if !self.interest.is_writable() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "descriptor is not registered for write readiness",
+            ));
+        }
+        self.registered
+            .ready(Direction::Write, |fd| operation(&mut fd.0))
             .await
     }
 }
@@ -105,6 +173,16 @@ impl<T: AsRawFd + Read> AsyncFd<T> {
     /// Returns an OS or reactor shutdown error.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.readable(|fd| fd.read(buf)).await
+    }
+}
+
+impl<T: AsRawFd + Write> AsyncFd<T> {
+    /// Wait for write readiness and return the exact number of bytes written.
+    ///
+    /// # Errors
+    /// Returns an OS or reactor error, including use without write interest.
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writable(|fd| fd.write(buf)).await
     }
 }
 

@@ -21,7 +21,7 @@ use mio::{Events, Interest, Registry, Token};
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{AsyncFd, Nonblocking, UnixListener};
+pub use unix::{AsyncFd, FdInterest, Nonblocking, UnixListener};
 
 const SHUTDOWN: Token = Token(0);
 

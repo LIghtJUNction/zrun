@@ -15,6 +15,59 @@ use std::time::Duration;
 use zrun::Runtime;
 use zrun::io::Poller;
 
+#[cfg(unix)]
+#[test]
+fn caller_driven_pipe_delivers_writes_larger_than_kernel_capacity() {
+    use zrun::io::{AsyncFd, FdInterest, Nonblocking};
+
+    let mut runtime = Runtime::new();
+    let mut poller = Poller::new().expect("create poller");
+    let (read_end, write_end) = std::io::pipe().expect("create stdin pipe");
+    let mut reader =
+        AsyncFd::new(poller.handle(), read_end, Nonblocking::Set).expect("register reader");
+    let mut writer = AsyncFd::with_interest(
+        poller.handle(),
+        write_end,
+        Nonblocking::Set,
+        FdInterest::Writable,
+    )
+    .expect("register writer");
+    let bytes: Vec<u8> = (0..(2 * 1024 * 1024))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let expected = bytes.clone();
+
+    let sent = runtime
+        .spawn(async move {
+            let mut offset = 0;
+            let mut writes = 0;
+            while offset < bytes.len() {
+                let count = writer.write(&bytes[offset..]).await.expect("write pipe");
+                assert_ne!(count, 0, "nonempty input should make progress");
+                offset += count;
+                writes += 1;
+            }
+            writes
+        })
+        .expect("spawn writer");
+    let (received, writes) = runtime
+        .block_on_with_io(&mut poller, async {
+            let mut received = Vec::new();
+            let mut buf = [0; 8192];
+            loop {
+                let count = reader.read(&mut buf).await.expect("read pipe");
+                if count == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..count]);
+            }
+            (received, sent.await.expect("complete writer"))
+        })
+        .expect("drive pipe I/O");
+    assert_eq!(received, expected);
+    assert!(writes > 1, "exercise partial writes through a bounded pipe");
+}
+
 #[test]
 fn foreign_admission_interrupts_a_caller_driven_poll() {
     let mut runtime = Runtime::new();
