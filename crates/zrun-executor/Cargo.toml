@@ -4,18 +4,19 @@ version = "0.1.0-p0.2"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
-publish = false
+description = "Bounded single-thread and pool executors for zrun"
+repository = "https://github.com/LIghtJUNction/zrun"
 
 [features]
 io = ["dep:zrun-io"]
 
 [dependencies]
-zrun-task = { path = "../zrun-task" }
-zrun-time = { path = "../zrun-time" }
-zrun-io = { path = "../zrun-io", optional = true }
+zrun-task = { version = "=0.1.0-p0.2", path = "../zrun-task" }
+zrun-time = { version = "=0.1.0-p0.2", path = "../zrun-time" }
+zrun-io = { version = "=0.1.0-p0.2", path = "../zrun-io", optional = true }
 
 [dev-dependencies]
-zrun-sync = { path = "../zrun-sync" }
+zrun-sync = { version = "=0.1.0-p0.2", path = "../zrun-sync" }
 loom = "0.7"
 
 [lints.rust]

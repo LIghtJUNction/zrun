@@ -39,7 +39,7 @@ jobs:
         shell: python
         run: |
           import subprocess
-          graph = subprocess.check_output(['cargo', '+1.100.0', 'tree', '-p', 'zrun', '--edges', 'normal', '--locked', '--prefix', 'none'], text=True)
+          graph = subprocess.check_output(['cargo', '+1.100.0', 'tree', '-p', 'zrun', '--edges', 'normal', '--all-features', '--locked', '--prefix', 'none'], text=True)
           print(graph)
           assert not any(line.split()[0] == 'tokio' for line in graph.splitlines() if line.strip()), 'Tokio entered the native runtime dependency graph'
       - name: Build comparator for source smoke

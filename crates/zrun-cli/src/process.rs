@@ -4,13 +4,13 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::pin::pin;
-use std::process::{Child, Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::process::{Command, Stdio};
 use std::task::Poll;
 use std::time::Duration;
 
 use zrun::Timer;
-use zrun::io::{AsyncFd, Handle, Nonblocking};
+use zrun::io::{AsyncFd, Handle};
+use zrun::process::Child;
 
 use crate::execution::{Request, ResultRecord};
 
@@ -37,12 +37,10 @@ pub(crate) async fn execute(
     if let Some(cwd) = request.cwd {
         command.current_dir(cwd);
     }
-    let mut group = ChildGroup::new(command.spawn()?);
+    let mut group = ChildGroup::new(zrun::process::spawn(&mut command, io)?);
     let child = group.child.as_mut().expect("the new group owns its child");
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let mut stdout = AsyncFd::new(io, stdout, Nonblocking::Set)?;
-    let mut stderr = AsyncFd::new(io, stderr, Nonblocking::Set)?;
+    let mut stdout = child.take_stdout()?.expect("stdout was piped");
+    let mut stderr = child.take_stderr()?.expect("stderr was piped");
     let mut out = Capture::default();
     let mut err = Capture::default();
     let deadline = timer.sleep(Duration::from_millis(request.timeout_ms));
@@ -50,7 +48,7 @@ pub(crate) async fn execute(
     let timed_out = {
         let mut out_read = pin!(out.drain(&mut stdout, max_output));
         let mut err_read = pin!(err.drain(&mut stderr, max_output));
-        let mut exited = pin!(zrun::process::wait_for_exit(group.child(), io, timer));
+        let mut exited = pin!(group.child().wait_for_exit(timer));
         let mut deadline = pin!(deadline);
         let mut leader_exited = false;
         let mut out_done = false;
@@ -83,9 +81,9 @@ pub(crate) async fn execute(
     };
     if timed_out {
         group.kill();
-        zrun::process::wait_for_exit(group.child(), io, timer).await?;
+        group.child().wait_for_exit(timer).await?;
     }
-    let status = group.reap()?;
+    let status = group.reap(timer).await?;
     let truncated = out.truncated || err.truncated;
     Ok(ResultRecord {
         exit_code: if timed_out {
@@ -169,11 +167,12 @@ impl ChildGroup {
         unsafe { libc::kill(-self.pid, libc::SIGKILL) };
     }
 
-    fn reap(mut self) -> io::Result<std::process::ExitStatus> {
+    async fn reap(mut self, timer: &Timer) -> io::Result<std::process::ExitStatus> {
         self.child
             .as_mut()
             .expect("group has not been reaped")
-            .wait()
+            .wait(timer)
+            .await
             .inspect(|_| {
                 self.child.take();
             })
@@ -182,41 +181,8 @@ impl ChildGroup {
 
 impl Drop for ChildGroup {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
+        if self.child.is_some() {
             self.kill();
-            if matches!(child.try_wait(), Ok(None)) {
-                reap_cancelled(child);
-            }
         }
-    }
-}
-
-fn reap_cancelled(child: Child) {
-    static REAPER: OnceLock<Option<mpsc::Sender<Child>>> = OnceLock::new();
-    let sender = REAPER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel::<Child>();
-        std::thread::Builder::new()
-            .name("zrun-reaper".into())
-            .spawn(move || {
-                let mut pending = Vec::new();
-                loop {
-                    if pending.is_empty() {
-                        let Ok(child) = receiver.recv() else { return };
-                        pending.push(child);
-                    } else if let Ok(child) = receiver.recv_timeout(Duration::from_millis(10)) {
-                        pending.push(child);
-                    }
-                    pending.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
-                }
-            })
-            .ok()
-            .map(|_| sender)
-    });
-    let unsent = match sender {
-        Some(sender) => sender.send(child).err().map(|error| error.0),
-        None => Some(child),
-    };
-    if let Some(mut child) = unsent {
-        let _ = child.wait();
     }
 }

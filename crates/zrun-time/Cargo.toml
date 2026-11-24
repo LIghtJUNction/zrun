@@ -4,4 +4,5 @@ version = "0.1.0-p0.2"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
-publish = false
+description = "Bounded asynchronous timers for zrun"
+repository = "https://github.com/LIghtJUNction/zrun"

@@ -72,31 +72,20 @@ fn caller_driven_pipe_delivers_writes_larger_than_kernel_capacity() {
 #[test]
 fn process_exit_notification_preserves_status_for_the_supervisor() {
     use std::process::{Command, Stdio};
-    use zrun::io::{AsyncFd, FdInterest, Nonblocking};
 
     let mut runtime = Runtime::new();
     let timer = runtime.timer();
     let mut poller = Poller::new().expect("create poller");
     let handle = poller.handle().clone();
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .args(["-c", "IFS= read -r line; printf '%s' \"$line\"; exit 37"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("launch shell");
-    let mut stdin = AsyncFd::with_interest(
-        &handle,
-        child.stdin.take().expect("stdin is piped"),
-        Nonblocking::Set,
-        FdInterest::Writable,
-    )
-    .expect("register stdin");
-    let mut stdout = AsyncFd::new(
-        &handle,
-        child.stdout.take().expect("stdout is piped"),
-        Nonblocking::Set,
-    )
-    .expect("register stdout");
+        .stdout(Stdio::piped());
+    let mut child = zrun::process::spawn(&mut command, &handle).expect("launch shell");
+    let mut stdin = child.take_stdin().unwrap().expect("stdin is piped");
+    let mut stdout = child.take_stdout().unwrap().expect("stdout is piped");
+    assert!(child.try_exit().unwrap().is_none());
     runtime
         .block_on_with_io(&mut poller, async {
             let message = b"literal input $value\n";
@@ -105,9 +94,11 @@ fn process_exit_notification_preserves_status_for_the_supervisor() {
                 message.len()
             );
             drop(stdin);
-            zrun::process::wait_for_exit(&child, &handle, &timer)
+            let observed = child
+                .wait_for_exit(&timer)
                 .await
                 .expect("observe the real child exit");
+            assert_eq!(observed.code(), Some(37));
             let mut output = Vec::new();
             let mut scratch = [0; 32];
             loop {
@@ -118,9 +109,10 @@ fn process_exit_notification_preserves_status_for_the_supervisor() {
                 output.extend_from_slice(&scratch[..count]);
             }
             assert_eq!(output, &message[..message.len() - 1]);
+            assert_eq!(child.wait(&timer).await.expect("reap child"), observed);
+            assert_eq!(child.wait(&timer).await.expect("cached status"), observed);
         })
         .expect("drive process I/O");
-    assert_eq!(child.wait().expect("reap child").code(), Some(37));
 }
 
 #[test]
