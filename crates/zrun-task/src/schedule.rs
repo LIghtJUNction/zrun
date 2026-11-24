@@ -143,6 +143,7 @@ impl ScheduleState {
         self.0.store(COMPLETE, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(super) fn is_complete(&self) -> bool {
         self.0.load(Ordering::Acquire) & COMPLETE != 0
     }

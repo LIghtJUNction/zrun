@@ -14,7 +14,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 use std::time::Duration;
 
-use zrun_task::{JoinHandle, Scheduler, Task};
+use zrun_task::{JoinHandle, Scheduler, Task, TaskRef};
 use zrun_time::{Driver, Timer};
 
 mod parking;
@@ -154,8 +154,8 @@ impl Wake for RootSignal {
 struct SchedulerState {
     closed: bool,
     next_id: u64,
-    tasks: Vec<Arc<Task>>,
-    ready: VecDeque<Arc<Task>>,
+    tasks: Vec<TaskRef>,
+    ready: VecDeque<TaskRef>,
 }
 
 struct Shared {
@@ -185,7 +185,7 @@ impl Shared {
                 let id = state.next_id;
                 state.next_id = next_id;
                 let scheduler: Arc<dyn Scheduler> = self.clone();
-                let (task, join) = Task::new(id, future, Arc::downgrade(&scheduler));
+                let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
                 task.set_registry_index(state.tasks.len());
                 state.tasks.push(task.clone());
                 state.ready.push_back(task);
@@ -200,7 +200,7 @@ impl Shared {
         accepted
     }
 
-    fn pop(&self) -> Option<Arc<Task>> {
+    fn pop(&self) -> Option<TaskRef> {
         lock(&self.state).ready.pop_front()
     }
 
@@ -210,14 +210,14 @@ impl Shared {
 }
 
 impl Scheduler for Shared {
-    fn enqueue(&self, task: Arc<Task>) {
+    fn enqueue(&self, task: TaskRef) {
         let queued = {
             let mut state = lock(&self.state);
             if !state.closed
                 && state
                     .tasks
                     .get(task.registry_index())
-                    .is_some_and(|registered| Arc::ptr_eq(registered, &task))
+                    .is_some_and(|registered| TaskRef::ptr_eq(registered, &task))
             {
                 // Task's state serialized Idle/Running -> Queued and gives
                 // exactly one caller this insertion responsibility.
@@ -239,7 +239,7 @@ impl Scheduler for Shared {
     }
 }
 
-fn remove_task(tasks: &mut Vec<Arc<Task>>, task: &Task) -> Option<Arc<Task>> {
+fn remove_task(tasks: &mut Vec<TaskRef>, task: &Task) -> Option<TaskRef> {
     let index = task.registry_index();
     if !tasks
         .get(index)

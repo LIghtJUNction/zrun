@@ -53,10 +53,6 @@ impl<T> FutureSlot<T> {
         self.state.abort()
     }
 
-    pub(super) fn is_complete(&self) -> bool {
-        self.state.is_complete()
-    }
-
     pub(super) fn begin(&self) -> Claim<'_, T> {
         match self.state.begin() {
             Begin::Skip => Claim::Skip,
@@ -97,6 +93,7 @@ impl<T> FutureSlot<T> {
 }
 
 impl<T> OwnedPoll<'_, T> {
+    #[cfg(all(test, loom))]
     pub(super) fn value_mut(&mut self) -> &mut T {
         &mut self.value
     }

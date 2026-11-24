@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError, Weak};
 use std::thread::{self, JoinHandle as WorkerThread};
 
-use zrun_task::{JoinHandle, Scheduler, Task};
+use zrun_task::{JoinHandle, Scheduler, Task, TaskRef};
 use zrun_time::{Driver, Timer};
 
 use crate::{
@@ -35,7 +35,7 @@ thread_local! {
 #[repr(align(128))]
 #[derive(Default)]
 struct Worker {
-    ready: Mutex<VecDeque<Arc<Task>>>,
+    ready: Mutex<VecDeque<TaskRef>>,
     retained: AtomicUsize,
     parker: Arc<Parker>,
 }
@@ -43,7 +43,7 @@ struct Worker {
 #[derive(Default)]
 struct Active {
     next_id: u64,
-    tasks: Vec<Arc<Task>>,
+    tasks: Vec<TaskRef>,
 }
 
 struct SharedPool {
@@ -74,7 +74,7 @@ impl SharedPool {
             let id = active.next_id;
             active.next_id = id.checked_add(1).ok_or(SpawnError::IdExhausted)?;
             let scheduler: Arc<dyn Scheduler> = self.clone();
-            let (task, join) = Task::new(id, future, Arc::downgrade(&scheduler));
+            let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
             task.set_registry_index(active.tasks.len());
             active.tasks.push(task.clone());
             (task, join)
@@ -96,9 +96,9 @@ impl SharedPool {
     fn next_task(
         &self,
         own: usize,
-        retained: &mut VecDeque<Arc<Task>>,
+        retained: &mut VecDeque<TaskRef>,
         retained_turns: &mut usize,
-    ) -> Option<Arc<Task>> {
+    ) -> Option<TaskRef> {
         let worker = &self.workers[own];
         let pop_ready = || lock(&worker.ready).pop_front();
         let mut pop_retained = || {
@@ -120,7 +120,7 @@ impl SharedPool {
             .or_else(|| self.steal(own))
     }
 
-    fn steal(&self, own: usize) -> Option<Arc<Task>> {
+    fn steal(&self, own: usize) -> Option<TaskRef> {
         let mut batch = std::array::from_fn::<_, STEAL_LIMIT, _>(|_| None);
         let len = self.workers.len();
         for offset in 1..len {
@@ -231,14 +231,14 @@ impl SharedPool {
 }
 
 impl SharedPool {
-    fn schedule(&self, task: Arc<Task>, arrival: Arrival) {
+    fn schedule(&self, task: TaskRef, arrival: Arrival) {
         let caller = self.local_worker();
         let owner = caller
             .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
         self.publish(task, owner, caller.is_some(), arrival);
     }
 
-    fn publish(&self, task: Arc<Task>, owner: usize, local: bool, arrival: Arrival) {
+    fn publish(&self, task: TaskRef, owner: usize, local: bool, arrival: Arrival) {
         let worker = &self.workers[owner];
         let backlog = {
             let mut ready = lock(&worker.ready);
@@ -270,7 +270,7 @@ impl SharedPool {
 }
 
 impl Scheduler for SharedPool {
-    fn enqueue(&self, task: Arc<Task>) {
+    fn enqueue(&self, task: TaskRef) {
         self.schedule(task, Arrival::Wake);
     }
 
