@@ -16,7 +16,7 @@
 
 ## P2：TCP IO
 
-可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。已完成 Linux 回环 TCP 的 1 和 4 worker 对照；单 worker 的两个小包用例通过吞吐门槛。P99、其余吞吐用例、更完整的连接与背压测试继续验收。io_uring 单独作为实验。[Linux TCP 数据](measurements/p2-tcp-linux-20261124.md)
+可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。按现行严格领先门槛复测了 Linux 回环 TCP 的 1、4、8 worker。只有 8 worker 的两项 P99 通过。TCP 吞吐、更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/tokio-superiority-linux-20261124.md)
 
 ## P3：平台与优化
 
