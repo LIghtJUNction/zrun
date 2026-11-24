@@ -1,5 +1,7 @@
 # zrun 命令服务
 
+普通 `.zrun` 文件使用配置的 shell。参见[原生异步 .zrun 脚本](native-script.md)。
+
 直接执行 `zrun` 会进入 `ZRUN_SHELL` 或 `SHELL` 指定的交互 shell。普通 shell 参数也可以直接传入，例如 `zrun -c 'cd /tmp; pwd'`。这种入口继承终端与 shell 的变量、作业控制和退出语义。受管执行从 `zrun run`、`zrun batch` 和 MCP 进入。
 
 ## 本地 socket

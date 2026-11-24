@@ -22,9 +22,12 @@ mod plugin;
 mod policy;
 #[cfg(target_os = "linux")]
 mod process;
+#[cfg(target_os = "linux")]
+mod script;
 
 const HELP: &str = "Usage:
   zrun [shell arguments...]       Enter the configured terminal shell
+  zrun FILE.zrun [ARGS...]        Run a shell file or a # zrun:1 async program
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
   zrun batch                      Run a batch of command objects from JSONL stdin
@@ -55,6 +58,33 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let mut args = argv;
     let shell = shell();
     let first = args.next();
+    #[cfg(target_os = "linux")]
+    if let Some(path) = first.as_ref().map(std::path::Path::new)
+        && path.extension().is_some_and(|ext| ext == "zrun")
+    {
+        use std::io::Seek;
+        let mut file = std::fs::File::open(path)?;
+        let mut prefix = Vec::new();
+        (&mut file).take(10).read_to_end(&mut prefix)?;
+        if prefix.starts_with(b"# zrun:1\n") || prefix.starts_with(b"# zrun:1\r\n") {
+            if args.next().is_some() {
+                return Err("native .zrun programs do not take positional arguments".into());
+            }
+            if env::var_os("ZRUN_SOCKET").is_some() {
+                return Err(
+                    "native .zrun programs currently use a local broker; unset ZRUN_SOCKET".into(),
+                );
+            }
+            file.rewind()?;
+            let mut source = String::new();
+            file.take(execution::Batch::MAX_INPUT as u64 + 1)
+                .read_to_string(&mut source)?;
+            if source.len() > execution::Batch::MAX_INPUT {
+                return Err("native .zrun program exceeds the byte limit".into());
+            }
+            return Ok(script::run(shell, &source)?);
+        }
+    }
     match first.as_deref().and_then(OsStr::to_str) {
         Some("--help" | "-h") => {
             println!("{HELP}");

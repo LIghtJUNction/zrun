@@ -451,3 +451,68 @@ fn mcp_batch_preserves_order_binary_output_and_escaped_content() {
     );
     assert_eq!(commands[1]["result"]["exit_code"], 7);
 }
+
+#[test]
+fn zrun_file_without_header_preserves_shell_arguments_and_exit_status() {
+    let dir = Directory::new();
+    let path = dir.0.join("plain.zrun");
+    fs::write(
+        &path,
+        "for arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nexit 7\n",
+    )
+    .unwrap();
+    let output = zrun()
+        .args([path.as_os_str(), "a b".as_ref(), "c".as_ref()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.stdout, b"<a b><c>");
+}
+
+#[test]
+fn native_script_jobs_overlap_and_emit_in_await_order() {
+    let dir = Directory::new();
+    let path = dir.0.join("overlap.zrun");
+    fs::write(
+        &path,
+        r#"# zrun:1
+async first {"script":"touch first; while [ ! -f second ]; do sleep .01; done; printf first","timeout_ms":5000}
+async second {"script":"touch second; while [ ! -f first ]; do sleep .01; done; printf second","timeout_ms":5000}
+await second
+await first
+"#,
+    ).unwrap();
+    let output = zrun().current_dir(&dir.0).arg(path).output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.stdout, b"secondfirst");
+}
+
+#[test]
+fn native_script_reuses_an_explicit_key_and_validates_before_running() {
+    let dir = Directory::new();
+    let path = dir.0.join("cache.zrun");
+    let request = json!({
+        "script": "printf x >> count; printf ok",
+        "reuse": {"scope":"fixture","input_revision":"v1","ttl_ms":5000}
+    });
+    fs::write(
+        &path,
+        format!(
+            "# zrun:1\nasync first {request}\nasync second {request}\nawait first\nawait second\n"
+        ),
+    )
+    .unwrap();
+    let output = zrun().current_dir(&dir.0).arg(&path).output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.stdout, b"okok");
+    assert_eq!(fs::read(dir.0.join("count")).unwrap(), b"x");
+
+    fs::write(
+        &path,
+        "# zrun:1\nshell <<END\ntouch unexpected\nEND\nawait missing\n",
+    )
+    .unwrap();
+    let output = zrun().current_dir(&dir.0).arg(path).output().unwrap();
+    assert!(!output.status.success());
+    assert!(!dir.0.join("unexpected").exists());
+}

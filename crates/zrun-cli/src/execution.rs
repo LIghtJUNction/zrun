@@ -583,6 +583,13 @@ impl Batch {
         Ok(Self { runtime, broker })
     }
 
+    pub(crate) fn drive<T>(
+        mut self,
+        program: impl AsyncFnOnce(&Broker) -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.runtime.block_on(program(&self.broker))?
+    }
+
     pub(crate) fn execute(
         mut self,
         requests: Vec<Request>,
