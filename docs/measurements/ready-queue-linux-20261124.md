@@ -45,3 +45,9 @@
 每档 24 对独立进程复测跨线程 P99。16 worker 比值为 1.082 [1.031, 1.164]，回退可复现。8 worker 比值为 1.017 [0.0013, 343.718]，首轮回退幅度未复现，复测区间仍很宽。该候选保持实验状态。
 
 同一构建在 16 worker 对 Tokio 的创建与回收吞吐为 0.422，唤醒吞吐为 0.453，每次唤醒 CPU 开销为 1.904。原始报告为 `zrun-ready-recheck-ab-w{8,16}/report.json`、`zrun-ready-recheck-tail-retake-w{8,16}/report.json` 和 `zrun-ready-recheck-tokio-w16/report.json`。
+
+## 休眠前复查版的 TCP 对照
+
+候选 `153481d` 分别完成相对主线和 Tokio 的各 240 个回环样本。相对主线，4 worker、128 连接 × 4 KiB 吞吐为 0.932 [0.772, 0.991]。
+
+同一候选对 Tokio，8 worker、64 连接 × 64 B 吞吐为 1.376 [1.081, 1.655]，往返 P99 为 0.506 [0.414, 0.659]。8 worker、128 连接 × 4 KiB 的对应比值为 1.351 [1.199, 1.447] 与 0.473 [0.424, 0.684]。8 worker、单连接 × 64 B 的吞吐为 0.781 [0.720, 0.857]，P99 为 1.444 [1.206, 1.627]。原始数据在 `zrun-ready-recheck-tcp-{paired,tokio}/report.json`。
