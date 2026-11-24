@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::execution::{Broker, Delivery, Request};
+use crate::execution::{Batch, Broker, Delivery, Request};
 use crate::executor::Executor;
 
 mod http;
@@ -322,9 +322,14 @@ async fn deadline_at<F: Future>(
         })
 }
 
+enum RemoteBatch {
+    Encoded(Vec<u8>),
+    Deferred(Vec<Request>),
+}
+
 pub(crate) fn run_remote(
     path: PathBuf,
-    mut requests: Vec<Request>,
+    requests: Vec<Request>,
     mut record: impl FnMut(usize, Delivery) -> io::Result<()>,
 ) -> io::Result<()> {
     if requests.len() > 4096 {
@@ -334,14 +339,8 @@ pub(crate) fn run_remote(
         ));
     }
     let cwd = std::env::current_dir()?;
-    for request in &mut requests {
+    for request in &requests {
         request.validate()?;
-        request.cwd = Some(
-            request
-                .cwd
-                .as_deref()
-                .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
-        );
     }
     let window = match std::env::var_os("ZRUN_BATCH_WINDOW") {
         None => 1,
@@ -361,10 +360,17 @@ pub(crate) fn run_remote(
     let mut requests = requests.into_iter();
     let mut offset = 0;
     let mut batches = Vec::new();
+    let mut retained = 0;
     while requests.len() != 0 {
-        let (payload, count) = encode_remote_batch(offset, requests.as_slice())?;
-        batches.push((offset, count, payload));
-        requests.nth(count - 1);
+        let (payload, count) = encode_remote_batch(&cwd, offset, requests.as_slice())?;
+        let body = if payload.capacity() <= Batch::MAX_INPUT - retained {
+            retained += payload.capacity();
+            requests.nth(count - 1);
+            RemoteBatch::Encoded(payload)
+        } else {
+            RemoteBatch::Deferred(requests.by_ref().take(count).collect())
+        };
+        batches.push((offset, count, body));
         offset += count;
     }
     let mut batches = batches.into_iter();
@@ -378,8 +384,12 @@ pub(crate) fn run_remote(
         let mut active = std::collections::VecDeque::with_capacity(window);
         while batches.len() != 0 || !active.is_empty() {
             while active.len() < window {
-                let Some((id, count, payload)) = batches.next() else {
+                let Some((id, count, body)) = batches.next() else {
                     break;
+                };
+                let payload = match body {
+                    RemoteBatch::Encoded(payload) => payload,
+                    RemoteBatch::Deferred(requests) => encode_remote_batch(&cwd, id, &requests)?.0,
                 };
                 let (pool, io, path, timer) =
                     (pool.clone(), io.clone(), path.clone(), timer.clone());
@@ -406,8 +416,25 @@ pub(crate) fn run_remote(
     })?
 }
 
-fn encode_remote_batch(offset: usize, requests: &[Request]) -> io::Result<(Vec<u8>, usize)> {
+fn encode_remote_batch(
+    cwd: &std::path::Path,
+    offset: usize,
+    requests: &[Request],
+) -> io::Result<(Vec<u8>, usize)> {
     let mut count = MAX_BATCH_COMMANDS.min(requests.len());
+    let requests: Vec<_> = requests[..count]
+        .iter()
+        .cloned()
+        .map(|mut request| {
+            request.cwd = Some(
+                request
+                    .cwd
+                    .as_deref()
+                    .map_or_else(|| cwd.to_path_buf(), |dir| cwd.join(dir)),
+            );
+            request
+        })
+        .collect();
     loop {
         let bytes = remote_payload(offset, &requests[..count])?;
         if bytes.len() <= MAX_MESSAGE {
@@ -502,14 +529,8 @@ async fn remote_records(
     Ok(records)
 }
 
-pub(crate) fn prepare_one(cwd: &std::path::Path, mut request: Request) -> io::Result<Vec<u8>> {
-    request.cwd = Some(
-        request
-            .cwd
-            .as_deref()
-            .map_or_else(|| cwd.to_path_buf(), |dir| cwd.join(dir)),
-    );
-    let (payload, _) = encode_remote_batch(0, &[request])?;
+pub(crate) fn prepare_one(cwd: &std::path::Path, request: Request) -> io::Result<Vec<u8>> {
+    let (payload, _) = encode_remote_batch(cwd, 0, &[request])?;
     Ok(payload)
 }
 
