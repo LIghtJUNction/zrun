@@ -1,6 +1,9 @@
+use std::future::{Future, poll_fn};
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use crate::execution::{Batch, Delivery, Request, Ticket};
 
@@ -9,6 +12,7 @@ pub(crate) const HEADER: &str = "# zrun:1";
 enum Step {
     Spawn(String, Request),
     Await(String),
+    DrainReady,
     Shell(Request),
 }
 
@@ -63,6 +67,10 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
                     return Err(fail("too many script steps"));
                 }
                 steps.extend(pending.drain(..).map(|name: &str| Step::Await(name.into())));
+            }
+            "await" if rest.trim_end() == "--ready" => {
+                pending.clear();
+                steps.push(Step::DrainReady);
             }
             "await" => {
                 for name in rest.split_whitespace() {
@@ -146,7 +154,7 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
     Ok(steps)
 }
 
-fn emit(delivery: Delivery) -> io::Result<u8> {
+fn emit(delivery: Delivery, status: &mut u8) -> io::Result<()> {
     let result = delivery.result;
     {
         let mut stdout = io::stdout().lock();
@@ -163,7 +171,10 @@ fn emit(delivery: Delivery) -> io::Result<u8> {
             "zrun: captured output exceeded its limit"
         )?;
     }
-    Ok(crate::exit_code(result.exit_code))
+    if *status == 0 {
+        *status = crate::exit_code(result.exit_code);
+    }
+    Ok(())
 }
 
 pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result<u8> {
@@ -209,6 +220,15 @@ pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result
     }
 }
 
+async fn await_ticket(ticket: io::Result<Ticket>) -> Delivery {
+    match ticket {
+        Ok(ticket) => ticket
+            .await
+            .unwrap_or_else(|error| Delivery::rejected(io::Error::other(error))),
+        Err(error) => Delivery::rejected(error),
+    }
+}
+
 async fn execute(
     steps: Vec<Step>,
     mut submit: impl AsyncFnMut(Vec<Request>) -> Vec<io::Result<Ticket>>,
@@ -232,22 +252,37 @@ async fn execute(
                 continue;
             }
             Step::Await(name) => pending.remove(&name).expect("validated await"),
+            Step::DrainReady => {
+                while !pending.is_empty() {
+                    let (name, delivery) = poll_fn(|cx| {
+                        for (name, ticket) in &mut pending {
+                            let delivery = match ticket {
+                                Ok(ticket) => match Pin::new(ticket).poll(cx) {
+                                    Poll::Ready(delivery) => delivery.map_err(io::Error::other),
+                                    Poll::Pending => continue,
+                                },
+                                Err(_) => return Poll::Ready((name.clone(), None)),
+                            };
+                            return Poll::Ready((name.clone(), Some(delivery)));
+                        }
+                        Poll::Pending
+                    })
+                    .await;
+                    let ticket = pending.remove(&name).expect("polled task is pending");
+                    let delivery = match delivery {
+                        Some(delivery) => delivery.unwrap_or_else(Delivery::rejected),
+                        None => await_ticket(ticket).await,
+                    };
+                    emit(delivery, &mut status)?;
+                }
+                continue;
+            }
             Step::Shell(request) => submit(vec![request])
                 .await
                 .pop()
                 .expect("one ticket for one request"),
         };
-        let delivery = match delivery {
-            Ok(ticket) => match ticket.await {
-                Ok(delivery) => delivery,
-                Err(error) => Delivery::rejected(io::Error::other(error)),
-            },
-            Err(error) => Delivery::rejected(error),
-        };
-        let code = emit(delivery)?;
-        if status == 0 {
-            status = code;
-        }
+        emit(await_ticket(delivery).await, &mut status)?;
     }
     Ok(status)
 }

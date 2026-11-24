@@ -655,6 +655,38 @@ await ready blocked
 }
 
 #[test]
+fn native_await_ready_delivers_a_later_job_before_a_blocked_job() {
+    let dir = Directory::new();
+    let path = dir.0.join("ready.zrun");
+    fs::write(
+        &path,
+        r#"# zrun:1
+async alpha {"script":"while [ ! -f release ]; do sleep .01; done; printf done","timeout_ms":5000}
+async beta -- printf ready
+await --ready
+async beta -- printf again
+await --ready
+"#,
+    )
+    .unwrap();
+    let mut child = zrun()
+        .current_dir(&dir.0)
+        .arg(path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let mut ready = [0; 5];
+    output.read_exact(&mut ready).unwrap();
+    fs::write(dir.0.join("release"), b"").unwrap();
+    let mut tail = String::new();
+    output.read_to_string(&mut tail).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(&ready, b"ready");
+    assert_eq!(tail, "doneagain");
+}
+
+#[test]
 fn native_script_reuses_an_explicit_key_and_validates_before_running() {
     let dir = Directory::new();
     let path = dir.0.join("cache.zrun");
