@@ -18,6 +18,7 @@ use crate::{
 
 const MAX_WORKERS: usize = 256;
 const STEAL_LIMIT: usize = 8;
+const SUBMISSION_CHUNK: usize = 8;
 const RETAINED_LIMIT: usize = 4;
 const RETAINED_TURNS: usize = 3;
 
@@ -60,6 +61,24 @@ struct SharedPool {
     clock: Driver,
 }
 
+// An iterator or rejected future may panic after an earlier admission.
+// Publish admitted tasks during unwinding as well as on normal return.
+struct Submission<'a> {
+    pool: &'a SharedPool,
+    ready: &'a mut Vec<TaskRef>,
+    owner: usize,
+    local: bool,
+}
+
+impl Drop for Submission<'_> {
+    fn drop(&mut self) {
+        if !self.ready.is_empty() {
+            self.pool
+                .publish_tasks(self.ready.drain(..), self.owner, self.local, Arrival::Spawn);
+        }
+    }
+}
+
 impl SharedPool {
     fn spawn<F>(self: &Arc<Self>, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
@@ -73,6 +92,39 @@ impl SharedPool {
         let (task, join) = self.admit(preferred, future)?;
         self.publish(task, owner, caller.is_some(), Arrival::Spawn);
         Ok(join)
+    }
+
+    fn spawn_batch<F>(
+        self: &Arc<Self>,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Vec<Result<JoinHandle<F::Output>, SpawnError>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let mut futures = futures.into_iter();
+        let caller = self.local_worker();
+        let mut results = Vec::new();
+        let mut ready = Vec::with_capacity(SUBMISSION_CHUNK);
+        while let Some(first) = futures.next() {
+            let owner = caller
+                .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
+            let preferred = owner % self.active.len();
+            let submission = Submission {
+                pool: self,
+                ready: &mut ready,
+                owner,
+                local: caller.is_some(),
+            };
+            for future in std::iter::once(first).chain(futures.by_ref().take(SUBMISSION_CHUNK - 1))
+            {
+                results.push(self.admit(preferred, future).map(|(task, join)| {
+                    submission.ready.push(task);
+                    join
+                }));
+            }
+        }
+        results
     }
 
     fn admit<F>(
@@ -299,13 +351,23 @@ impl SharedPool {
     }
 
     fn publish(&self, task: TaskRef, owner: usize, local: bool, arrival: Arrival) {
+        self.publish_tasks(std::iter::once(task), owner, local, arrival);
+    }
+
+    fn publish_tasks(
+        &self,
+        tasks: impl IntoIterator<Item = TaskRef>,
+        owner: usize,
+        local: bool,
+        arrival: Arrival,
+    ) {
         let worker = &self.workers[owner];
         let backlog = {
             let mut ready = lock(&worker.ready);
             if self.closed.load(Ordering::Acquire) {
                 return;
             }
-            ready.push_back(task);
+            ready.extend(tasks);
             ready.len()
         };
         // A worker publishing to its own queue cannot be parked. An external
@@ -431,6 +493,21 @@ impl Pool {
         self.shared.spawn(future)
     }
 
+    /// Admit futures in bounded chunks, publishing each chunk together.
+    ///
+    /// Results preserve input order. Each future is admitted independently.
+    /// Jobs earlier in the batch may run before this method returns.
+    pub fn spawn_batch<F>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Vec<Result<JoinHandle<F::Output>, SpawnError>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.shared.spawn_batch(futures)
+    }
+
     /// Obtain a cross-thread handle for admission to this pool.
     pub fn spawner(&self) -> PoolSpawner {
         PoolSpawner(Arc::downgrade(&self.shared))
@@ -509,5 +586,25 @@ impl PoolSpawner {
         F::Output: Send + 'static,
     {
         self.0.upgrade().ok_or(SpawnError::Shutdown)?.spawn(future)
+    }
+
+    /// Admit futures in bounded chunks, returning one result per input.
+    ///
+    /// A dropped pool yields a shutdown error for every input.
+    pub fn spawn_batch<F>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+    ) -> Vec<Result<JoinHandle<F::Output>, SpawnError>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self.0.upgrade() {
+            Some(pool) => pool.spawn_batch(futures),
+            None => futures
+                .into_iter()
+                .map(|_| Err(SpawnError::Shutdown))
+                .collect(),
+        }
     }
 }

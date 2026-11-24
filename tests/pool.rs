@@ -297,3 +297,48 @@ fn retained_runnable_stays_visible_and_can_be_aborted() {
     assert_eq!(pool.stats().active_tasks, 0);
     assert_eq!(pool.stats().queued_tasks, 0);
 }
+
+#[test]
+fn batch_admission_preserves_order_and_reports_capacity_per_task() {
+    let mut pool = Pool::with_max_tasks(2, 32).unwrap();
+    let jobs = pool.spawn_batch((0..20).map(std::future::ready));
+    for (index, job) in jobs.into_iter().enumerate() {
+        assert_eq!(pool.block_on(job.unwrap()), Ok(index));
+    }
+
+    let mut pool = Pool::with_max_tasks(2, 3).unwrap();
+    let mut jobs = pool.spawner().spawn_batch((0..7).map(|index| async move {
+        pending::<()>().await;
+        index
+    }));
+    assert!(jobs[..3].iter().all(Result::is_ok));
+    assert!(
+        jobs[3..]
+            .iter()
+            .all(|job| matches!(job, Err(SpawnError::AtCapacity { capacity: 3 })))
+    );
+    for job in jobs.drain(..3).map(Result::unwrap) {
+        job.abort();
+        assert_eq!(pool.block_on(job), Err(JoinError::Cancelled));
+    }
+}
+
+#[test]
+fn batch_iterator_panic_still_publishes_admitted_tasks() {
+    let pool = Pool::with_max_tasks(2, 3).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pool.spawn_batch((0..3).map(|index| {
+            assert!(index < 2);
+            let tx = tx.clone();
+            async move { tx.send(index).unwrap() }
+        }))
+    }));
+    assert!(result.is_err());
+    let mut received = [
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    received.sort_unstable();
+    assert_eq!(received, [0, 1]);
+}
