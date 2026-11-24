@@ -29,6 +29,7 @@ pub(crate) async fn execute(
         .env_remove("ZRUN_POLICY")
         .env_remove("ZRUN_PLUGIN")
         .env_remove("ZRUN_SOCKET")
+        .env_remove("ZRUN_WORKERS")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

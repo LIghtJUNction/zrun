@@ -21,7 +21,12 @@ def process_sample(pid):
     try:
         status = Path(f"/proc/{pid}/status").read_text()
         fields = dict(line.split(":", 1) for line in status.splitlines())
-        children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+        children = set()
+        for worker in Path(f"/proc/{pid}/task").iterdir():
+            try:
+                children.update((worker / "children").read_text().split())
+            except FileNotFoundError:
+                continue
         return (
             int(fields["VmRSS"].split()[0]),
             int(fields["Threads"]),
@@ -112,11 +117,12 @@ async def load(path, pid, agents, mode):
     }
 
 
-def run(binary, agents, mode):
+def run(binary, agents, mode, workers):
     with tempfile.TemporaryDirectory(prefix="zrun-load-") as directory:
         path = Path(directory) / "run.sock"
         env = {key: value for key, value in os.environ.items() if not key.startswith("ZRUN_")}
         env["ZRUN_SHELL"] = "/bin/sh"
+        env["ZRUN_WORKERS"] = str(workers)
         process = subprocess.Popen(
             [binary, "mcp", "--unix", path],
             stderr=subprocess.PIPE,
@@ -141,14 +147,15 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--agents", type=int, default=1_000)
     parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--workers", type=int, choices=range(1,17), default=1)
     args = parser.parse_args()
     if not 1 <= args.agents <= 2_000 or args.rounds < 1:
         parser.error("agents must be 1..2000 and rounds must be positive")
     for round_number in range(args.rounds):
         modes = ("live", "reuse") if round_number % 2 == 0 else ("reuse", "live")
         for mode in modes:
-            sample = run(args.binary.resolve(), args.agents, mode)
-            print(json.dumps({"round": round_number + 1, **sample}), flush=True)
+            sample = run(args.binary.resolve(), args.agents, mode, args.workers)
+            print(json.dumps({"round": round_number + 1, "workers": args.workers, **sample}), flush=True)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ use zrun::Runtime;
 use zrun::io::Reactor;
 
 use crate::execution::{Broker, Delivery, Request};
+use crate::executor::Executor;
 
 mod http;
 
@@ -66,9 +67,13 @@ pub(crate) fn serve(
 }
 
 fn serve_stdio(shell: PathBuf) -> io::Result<()> {
-    let mut runtime = Runtime::new();
-    let reactor = Reactor::new()?;
     let socket = std::env::var_os("ZRUN_SOCKET").map(PathBuf::from);
+    let mut runtime = if socket.is_some() {
+        Executor::current()
+    } else {
+        Executor::configured()?
+    };
+    let reactor = Reactor::new()?;
     let broker = if socket.is_none() {
         Some(Broker::new(
             shell,

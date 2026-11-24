@@ -19,6 +19,7 @@ fn zrun() -> Command {
         .env_remove("ZRUN_SOCKET")
         .env_remove("ZRUN_MCP_TOKEN")
         .env_remove("ZRUN_POLICY")
+        .env_remove("ZRUN_WORKERS")
         .env_remove("ZRUN_PLUGIN");
     command
 }
@@ -206,7 +207,8 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
         zrun()
             .args(["mcp", "--http", "127.0.0.1:0", "--unix"])
             .arg(&sock)
-            .env("ZRUN_MCP_TOKEN", token),
+            .env("ZRUN_MCP_TOKEN", token)
+            .env("ZRUN_WORKERS", "4"),
     );
     let line = startup(&mut stderr);
     let addr = line

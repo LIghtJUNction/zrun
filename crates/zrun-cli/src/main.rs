@@ -9,6 +9,8 @@ mod bytes;
 #[cfg(target_os = "linux")]
 mod execution;
 #[cfg(target_os = "linux")]
+mod executor;
+#[cfg(target_os = "linux")]
 mod mcp;
 #[cfg(target_os = "linux")]
 mod plugin;
@@ -27,7 +29,8 @@ const HELP: &str = "Usage:
   zrun --help
   zrun --version
 
-ZRUN_SHELL selects the shell executable, followed by SHELL on Unix.";
+ZRUN_SHELL selects the shell executable, followed by SHELL on Unix.
+ZRUN_WORKERS selects the worker count for the managed runtime.";
 
 fn main() -> ExitCode {
     match run() {

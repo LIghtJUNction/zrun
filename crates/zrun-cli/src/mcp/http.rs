@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use zrun::Timer;
 use zrun::io::{Listener, Reactor, Stream, UnixListener};
-use zrun::{Runtime, Spawner, Timer};
 
 use super::{MAX_MESSAGE, deadline, respond, supports_protocol};
 use crate::execution::Broker;
+use crate::executor::{Executor, Spawner};
 
 const MAX_CONNECTIONS: usize = 2_048;
 const MAX_HEADERS: usize = 16 * 1024;
@@ -22,7 +23,7 @@ pub(super) fn serve(
     unix: Option<PathBuf>,
 ) -> io::Result<()> {
     let (signals, mut shutdown) = Signals::new()?;
-    let runtime = Runtime::new();
+    let runtime = Executor::configured()?;
     let reactor = Reactor::new()?;
     let timer = runtime.timer();
     let broker = Arc::new(Broker::new(

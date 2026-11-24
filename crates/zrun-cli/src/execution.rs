@@ -8,9 +8,11 @@ use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use zrun::Timer;
 use zrun::io::{Handle, Reactor};
 use zrun::sync::{self, Receiver, Sender};
-use zrun::{Runtime, Spawner, Timer};
+
+use crate::executor::{Executor, Spawner};
 
 use crate::plugin::Plugin;
 use crate::policy::Gate;
@@ -433,7 +435,7 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
 }
 
 pub(crate) struct Batch {
-    runtime: Runtime,
+    runtime: Executor,
     broker: Broker,
     _reactor: Reactor,
 }
@@ -442,7 +444,7 @@ impl Batch {
     pub(crate) const MAX_INPUT: usize = 2 * 1024 * 1024;
 
     pub(crate) fn new(shell: PathBuf) -> io::Result<Self> {
-        let runtime = Runtime::new();
+        let runtime = Executor::configured()?;
         let reactor = Reactor::new()?;
         let broker = Broker::new(shell, reactor.handle(), runtime.timer(), &runtime.spawner())?;
         Ok(Self {
@@ -471,7 +473,10 @@ impl Batch {
                     let Some((index, request)) = requests.next() else {
                         break;
                     };
-                    running.push((index, self.broker.submit(request).await?));
+                    match self.broker.submit(request).await {
+                        Ok(ticket) => running.push((index, ticket)),
+                        Err(error) => record(index, Delivery::rejected(error))?,
+                    }
                 }
                 if running.is_empty() {
                     return Ok(());
