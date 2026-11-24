@@ -50,6 +50,16 @@ impl Budget {
         })
     }
 
+    pub(crate) async fn reserve(self: &Arc<Self>, bytes: usize) -> Reservation {
+        loop {
+            let generation = self.generation();
+            if let Some(reservation) = self.try_reserve(bytes) {
+                return reservation;
+            }
+            self.changed(generation).await;
+        }
+    }
+
     pub(crate) async fn changed(&self, generation: u64) {
         let id = self.next_waiter.fetch_add(1, Ordering::Relaxed);
         let _waiter = Waiter { budget: self, id };
@@ -106,6 +116,14 @@ impl Reservation {
         self.budget.notify(0);
     }
 
+    pub(crate) fn shrink_to(&mut self, bytes: usize) {
+        let unused = self.bytes - bytes;
+        if unused != 0 {
+            self.bytes = bytes;
+            self.budget.notify(unused);
+        }
+    }
+
     pub(crate) fn split(&mut self, bytes: usize) -> Self {
         self.bytes -= bytes;
         Self {
@@ -142,6 +160,25 @@ mod tests {
         assert!(waiter.as_mut().poll(&mut cx).is_pending());
         drop(first);
         assert!(waiter.as_mut().poll(&mut cx).is_ready());
+        assert!(budget.try_reserve(7).is_some());
+    }
+
+    #[test]
+    fn a_whole_batch_waits_until_the_full_reservation_is_available() {
+        let budget = Budget::new(10);
+        let mut first = budget.try_reserve(8).unwrap();
+        let mut second = pin!(budget.reserve(7));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert!(budget.try_reserve(2).is_some());
+        first.shrink_to(4);
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        first.shrink_to(3);
+        let Poll::Ready(credit) = second.as_mut().poll(&mut cx) else {
+            panic!("the complete reservation should now fit");
+        };
+        assert!(budget.try_reserve(1).is_none());
+        drop(credit);
         assert!(budget.try_reserve(7).is_some());
     }
 

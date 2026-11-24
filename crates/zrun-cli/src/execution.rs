@@ -31,6 +31,7 @@ const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 1_024;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENCODED_OUTPUT: usize = 32 * 1024 * 1024;
+const MAX_RAW_OUTPUT: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -177,6 +178,10 @@ impl ResultRecord {
         }
     }
 
+    pub(crate) fn capture_capacity(&self) -> usize {
+        self.stdout.capacity() + self.stderr.capacity()
+    }
+
     pub(crate) fn prepared_encoding(&self) -> Option<Arc<EncodedResult>> {
         self.encoding
             .prepared
@@ -295,7 +300,7 @@ impl Cache {
             return;
         }
         // Account allocated buffer capacity and bound metadata independently by entry count.
-        let size = command_bytes + result.stdout.capacity() + result.stderr.capacity();
+        let size = command_bytes + result.capture_capacity();
         if size > MAX_CACHE_BYTES {
             return;
         }
@@ -360,6 +365,7 @@ struct Shared {
     shell: PathBuf,
     directory: PathBuf,
     output_budget: Arc<Budget>,
+    raw_output_budget: Arc<Budget>,
     io: Handle,
     timer: Timer,
 }
@@ -389,6 +395,7 @@ impl Broker {
             shell,
             directory: std::env::current_dir()?,
             output_budget: Budget::new(MAX_ENCODED_OUTPUT),
+            raw_output_budget: Budget::new(MAX_RAW_OUTPUT),
             io: io.clone(),
             timer,
         });
@@ -409,6 +416,13 @@ impl Broker {
 
     pub(crate) fn output_budget(&self) -> &Arc<Budget> {
         &self.shared.output_budget
+    }
+
+    pub(crate) async fn reserve_capture(&self, commands: usize) -> Reservation {
+        self.shared
+            .raw_output_budget
+            .reserve(commands * 2 * MAX_OUTPUT)
+            .await
     }
 
     pub(crate) async fn submit(&self, mut request: Request) -> io::Result<Receiver<Delivery>> {

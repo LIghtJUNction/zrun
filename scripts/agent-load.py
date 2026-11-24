@@ -203,7 +203,7 @@ async def slow_output(path, pid, agents):
     }
 
 
-async def distinct_output(path, pid, agents, batch):
+async def distinct_output(path, pid, agents, batch, raw):
     marker = path.with_name("finished")
     idle_rss = process_sample(pid)[0]
     drain = asyncio.Event()
@@ -211,11 +211,15 @@ async def distinct_output(path, pid, agents, batch):
     started = asyncio.Queue()
     headers_ready = 0
 
+    script = LARGE_SCRIPT.replace("""'"'""", "x") if raw else LARGE_SCRIPT
+    expected_output = {"encoding": "utf8", "data": ("x" if raw else '"') * 65536}
+    readers = asyncio.Semaphore(4 if raw else agents)
+
     async def client(index):
         nonlocal headers_ready
         first = index * batch
         commands = [
-            {"script": f"{LARGE_SCRIPT}; printf '%s\\n' {i} >> {marker}"}
+            {"script": f"{script}; printf '%s\\n' {i} >> {marker}"}
             for i in range(first, first + batch)
         ]
         arguments, tool = (
@@ -229,17 +233,18 @@ async def distinct_output(path, pid, agents, batch):
         length = await response_length(reader)
         headers_ready += 1
         await drain.wait()
-        rpc = json.loads(await reader.readexactly(length))
-        assert rpc["id"] == index and not rpc["result"]["isError"]
-        payload = rpc["result"]["structuredContent"]
-        assert json.loads(rpc["result"]["content"][0]["text"]) == payload
-        replies = [payload] if batch == 1 else payload["commands"]
-        assert len(replies) == batch
-        for reply in replies:
-            assert reply["disposition"] == "executed"
-            result = reply["result"]
-            assert result["exit_code"] == 0 and not result["truncated"]
-            assert result["stdout"] == result["stderr"] == LARGE_OUTPUT
+        async with readers:
+            rpc = json.loads(await reader.readexactly(length))
+            assert rpc["id"] == index and not rpc["result"]["isError"]
+            payload = rpc["result"]["structuredContent"]
+            assert json.loads(rpc["result"]["content"][0]["text"]) == payload
+            replies = [payload] if batch == 1 else payload["commands"]
+            assert len(replies) == batch
+            for reply in replies:
+                assert reply["disposition"] == "executed"
+                result = reply["result"]
+                assert result["exit_code"] == 0 and not result["truncated"]
+                assert result["stdout"] == result["stderr"] == expected_output
         return length
 
     start = time.monotonic()
@@ -248,14 +253,21 @@ async def distinct_output(path, pid, agents, batch):
             calls = [group.create_task(client(index)) for index in range(agents)]
             for _ in calls:
                 await started.get()
+            total = agents * batch
             done = []
-            while len(done) < agents * batch:
-                if marker.exists():
-                    done = marker.read_text().splitlines()
+            last_change = time.monotonic()
+            while len(done) < total:
+                current = marker.read_text().splitlines() if marker.exists() else []
+                if len(current) != len(done):
+                    last_change = time.monotonic()
+                    done = current
+                if raw and done and time.monotonic() - last_change > 0.4:
+                    if process_sample(pid)[2] == 0:
+                        break
                 await asyncio.sleep(0.01)
-            assert sorted(int(index) for index in done) == list(range(agents * batch))
             await asyncio.sleep(0.1)
             held_rss, threads, children = process_sample(pid)
+            held_commands = len(marker.read_text().splitlines())
             held_headers = headers_ready
             drain.set()
         lengths = [call.result() for call in calls]
@@ -264,8 +276,9 @@ async def distinct_output(path, pid, agents, batch):
             writer.close()
         await asyncio.gather(*(writer.wait_closed() for writer in connections))
     assert children == 0 and headers_ready == agents
+    assert sorted(map(int, marker.read_text().splitlines())) == list(range(agents * batch))
     return {
-        "mode": "distinct-output",
+        "mode": "raw-output" if raw else "distinct-output",
         "agents": agents,
         "batch_size": batch,
         "commands": agents * batch,
@@ -274,6 +287,7 @@ async def distinct_output(path, pid, agents, batch):
         "held_rss_kib": held_rss,
         "held_threads": threads,
         "held_children": children,
+        "commands_before_reading_bodies": held_commands,
         "headers_before_reading_bodies": held_headers,
         "verified_response_bytes": sum(lengths),
     }
@@ -345,8 +359,9 @@ def run(binary, agents, mode, workers, batch=1):
                     raise TimeoutError("zrun daemon did not announce readiness")
                 announced = process.stderr.readline()
             assert announced.strip() == f"zrun: unix:{path}".encode(), announced
-            if mode == "distinct-output":
-                return asyncio.run(asyncio.wait_for(distinct_output(path, process.pid, agents, batch), timeout=60))
+            if mode in ("distinct-output", "raw-output"):
+                output = distinct_output(path, process.pid, agents, batch, mode == "raw-output")
+                return asyncio.run(asyncio.wait_for(output, timeout=60))
             if mode in ("slow-input", "slow-output"):
                 stalled = slow_input if mode == "slow-input" else slow_output
                 return asyncio.run(asyncio.wait_for(stalled(path, process.pid, agents), timeout=60))
@@ -364,6 +379,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--commands-per-request", type=int, choices=range(1, 17), default=1)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--raw-output-baseline", type=Path, help="compare completed commands while raw results wait")
     comparisons.add_argument("--distinct-output-baseline", type=Path, help="compare distinct large results with this baseline daemon")
     comparisons.add_argument("--slow-input-baseline", type=Path, help="compare partial request memory with this baseline daemon")
     comparisons.add_argument("--slow-output-baseline", type=Path, help="compare cached large output with this baseline daemon")
@@ -371,12 +387,14 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.agents <= 2_000 or args.rounds < 1:
         parser.error("agents must be 1..2000 and rounds must be positive")
-    baseline = args.distinct_output_baseline or args.slow_input_baseline or args.slow_output_baseline
-    if baseline:
-        if args.distinct_output_baseline:
-            mode = "distinct-output"
-        else:
-            mode = "slow-input" if args.slow_input_baseline else "slow-output"
+    for mode, baseline in (
+        ("raw-output", args.raw_output_baseline),
+        ("distinct-output", args.distinct_output_baseline),
+        ("slow-input", args.slow_input_baseline),
+        ("slow-output", args.slow_output_baseline),
+    ):
+        if not baseline:
+            continue
         order = [("candidate", args.binary), ("baseline", baseline)]
         for round_number in range(args.rounds):
             binaries = order if round_number % 2 == 0 else reversed(order)

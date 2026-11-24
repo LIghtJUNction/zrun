@@ -86,6 +86,7 @@ pub(crate) async fn execute(
         wait_until_exited(group.pid, io, timer).await?;
     }
     let status = group.reap()?;
+    let truncated = out.truncated || err.truncated;
     Ok(ResultRecord {
         exit_code: if timed_out {
             124
@@ -94,9 +95,9 @@ pub(crate) async fn execute(
                 .code()
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
         },
-        stdout: out.bytes,
-        stderr: err.bytes,
-        truncated: out.truncated || err.truncated,
+        stdout: out.finish(max_output),
+        stderr: err.finish(max_output),
+        truncated,
         error: timed_out.then(|| "command timed out".into()),
         encoding: Default::default(),
     })
@@ -109,6 +110,14 @@ struct Capture {
 }
 
 impl Capture {
+    fn finish(self, limit: usize) -> Vec<u8> {
+        if self.bytes.capacity() > limit {
+            self.bytes.into_boxed_slice().into_vec()
+        } else {
+            self.bytes
+        }
+    }
+
     async fn drain<T: AsRawFd + Read>(
         &mut self,
         pipe: &mut AsyncFd<T>,
@@ -122,7 +131,12 @@ impl Capture {
                 if count == 0 {
                     return Ok(());
                 }
-                let retain = count.min(limit.saturating_sub(self.bytes.len()));
+                let retain = count.min(limit - self.bytes.len());
+                let required = self.bytes.len() + retain;
+                if required > self.bytes.capacity() {
+                    let capacity = required.next_power_of_two().min(limit);
+                    self.bytes.reserve_exact(capacity - self.bytes.len());
+                }
                 self.bytes.extend_from_slice(&buf[..retain]);
                 self.truncated |= retain != count;
             }

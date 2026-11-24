@@ -272,9 +272,10 @@ async fn handle(
         Err(ReadError::Io(error)) => return Err(error),
         Err(ReadError::Http(status)) => (status, None),
         Ok(frame) => {
-            let message = serde_json::from_slice(&frame.bytes);
-            drop(frame);
-            match respond(broker, message).await? {
+            let Frame { bytes, charge } = frame;
+            let message = serde_json::from_slice(&bytes);
+            drop(bytes);
+            match respond(broker, message, charge).await? {
                 Some(reply) => (Status::Ok, Some(reply)),
                 None => (Status::Accepted, None),
             }
@@ -330,6 +331,11 @@ impl From<Status> for ReadError {
 
 struct Frame<'a> {
     bytes: Vec<u8>,
+    charge: IngressCharge<'a>,
+}
+
+#[derive(Default)]
+pub(super) struct IngressCharge<'a> {
     ingress: Option<&'a AtomicUsize>,
     reserved: usize,
 }
@@ -338,8 +344,10 @@ impl<'a> Frame<'a> {
     fn new(ingress: Option<&'a AtomicUsize>) -> Self {
         Self {
             bytes: Vec::new(),
-            ingress,
-            reserved: 0,
+            charge: IngressCharge {
+                ingress,
+                reserved: 0,
+            },
         }
     }
 
@@ -354,18 +362,25 @@ impl<'a> Frame<'a> {
         }
         if required > self.bytes.capacity() {
             let capacity = required.next_power_of_two().min(MAX_REQUEST_BUFFER);
-            self.charge(capacity)?;
+            self.charge.grow(capacity)?;
             self.bytes
                 .try_reserve_exact(capacity - self.bytes.len())
                 .map_err(io::Error::other)?;
             // An allocator may return spare capacity. Charge for that too.
-            self.charge(self.bytes.capacity())?;
+            self.charge.grow(self.bytes.capacity())?;
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
-    fn charge(&mut self, capacity: usize) -> Result<(), Status> {
+    fn discard_prefix(&mut self, offset: usize) {
+        self.bytes.copy_within(offset.., 0);
+        self.bytes.truncate(self.bytes.len() - offset);
+    }
+}
+
+impl IngressCharge<'_> {
+    fn grow(&mut self, capacity: usize) -> Result<(), Status> {
         if let Some(used) = self.ingress
             && capacity > self.reserved
         {
@@ -378,18 +393,13 @@ impl<'a> Frame<'a> {
         }
         Ok(())
     }
-
-    fn discard_prefix(&mut self, offset: usize) {
-        self.bytes.copy_within(offset.., 0);
-        self.bytes.truncate(self.bytes.len() - offset);
-    }
 }
 
-impl Drop for Frame<'_> {
+impl Drop for IngressCharge<'_> {
     fn drop(&mut self) {
-        if let Some(used) = self.ingress {
-            // Release the buffer before another worker can use its budget.
-            drop(std::mem::take(&mut self.bytes));
+        if let Some(used) = self.ingress
+            && self.reserved != 0
+        {
             used.fetch_sub(self.reserved, Ordering::Relaxed);
         }
     }

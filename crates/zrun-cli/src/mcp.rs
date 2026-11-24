@@ -126,6 +126,7 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
             let Some(response) = runtime.block_on(respond(
                 broker.as_ref().expect("local stdio has a broker"),
                 serde_json::from_slice(&line),
+                http::IngressCharge::default(),
             ))??
             else {
                 continue;
@@ -146,6 +147,7 @@ pub(crate) fn supports_protocol(version: &str) -> bool {
 async fn respond(
     broker: &Broker,
     message: serde_json::Result<Value>,
+    ingress: http::IngressCharge<'_>,
 ) -> serde_json::Result<Option<Reply>> {
     let message = match message {
         Ok(message) => message,
@@ -185,10 +187,20 @@ async fn respond(
             };
             let id = id.clone();
             drop(message);
-            let records = execute_call(broker, commands).await;
-            return Reply::tool(&id, &records, batch, broker.output_budget())
-                .await
-                .map(Some);
+            // Reserve the full batch before dispatch. Partial reservations
+            // could leave several batches each waiting on the others to finish.
+            let mut capture = broker.reserve_capture(commands.len()).await;
+            let records = execute_call(broker, commands, ingress).await;
+            capture.shrink_to(
+                records
+                    .iter()
+                    .map(|item| item.result.capture_capacity())
+                    .sum(),
+            );
+            let reply = Reply::tool(&id, &records, batch, broker.output_budget()).await;
+            drop(records);
+            drop(capture);
+            return reply.map(Some);
         }
         _ => return rpc_error(id.clone(), -32601, "method not found"),
     };
@@ -267,11 +279,16 @@ fn parse_call(params: &Value) -> Result<(bool, Vec<Request>), String> {
     Ok((params["name"] == "shell_batch", batch.commands))
 }
 
-async fn execute_call(broker: &Broker, commands: Vec<Request>) -> Vec<Delivery> {
+async fn execute_call(
+    broker: &Broker,
+    commands: Vec<Request>,
+    ingress: http::IngressCharge<'_>,
+) -> Vec<Delivery> {
     let mut tickets = Vec::with_capacity(commands.len());
     for command in commands {
         tickets.push(broker.submit(command).await);
     }
+    drop(ingress);
     let mut records = Vec::with_capacity(tickets.len());
     for ticket in tickets {
         let delivery = match ticket {
