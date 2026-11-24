@@ -215,6 +215,7 @@ enum Begin {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Pending {
+    Repoll,
     Idle,
     Requeue,
     Cancel(CancelReason),
@@ -265,15 +266,19 @@ impl ScheduleState {
         Begin::Poll
     }
 
-    fn pending(&mut self) -> Pending {
+    fn pending(&mut self, can_repoll: bool) -> Pending {
         debug_assert_eq!(self.phase, Phase::Running);
         if let Some(reason) = self.cancel {
             self.complete();
             Pending::Cancel(reason)
         } else if self.notified {
-            self.phase = Phase::Queued;
             self.notified = false;
-            Pending::Requeue
+            if can_repoll {
+                Pending::Repoll
+            } else {
+                self.phase = Phase::Queued;
+                Pending::Requeue
+            }
         } else {
             self.phase = Phase::Idle;
             Pending::Idle
@@ -392,83 +397,70 @@ impl Task {
     }
 
     /// Poll and immediately drive a bounded number of notifications observed
-    /// during those polls. The final notification is published as usual.
-    ///
-    /// Between polls the task is Queued and the driver owns the single runnable
-    /// reservation. Cancellation and shutdown retain the same phase checks.
-    pub fn run_budget(self: &Arc<Self>, inline_repolls: usize) {
-        for _ in 0..=inline_repolls {
-            if !self.poll_once() {
-                return;
-            }
-        }
-        self.enqueue();
-    }
-
-    // True transfers a queued runnable reservation back to the driver.
-    fn poll_once(self: &Arc<Self>) -> bool {
+    /// during those polls. The driver keeps the future and its waker across
+    /// the inline polls. When the budget expires, it publishes one runnable.
+    pub fn run_budget(self: &Arc<Self>, mut inline_repolls: usize) {
         let (mut future, cancelled) = {
             let mut state = lock(&self.state);
-            let action = state.schedule.begin();
-            match action {
-                Begin::Skip => return false,
-                Begin::Poll => (
-                    state.future.take().expect("a runnable owns one future"),
-                    None,
-                ),
-                Begin::Cancel(reason) => (
-                    state
-                        .future
-                        .take()
-                        .expect("a cancelled runnable owns one future"),
-                    Some(reason),
-                ),
-            }
+            let cancelled = match state.schedule.begin() {
+                Begin::Skip => return,
+                Begin::Poll => None,
+                Begin::Cancel(reason) => Some(reason),
+            };
+            (
+                state.future.take().expect("a runnable owns one future"),
+                cancelled,
+            )
         };
 
         if let Some(reason) = cancelled {
             self.finish_failure(future, reason.error());
-            return false;
+            return;
         }
 
         let waker = task_waker(self.clone());
         let mut cx = Context::from_waker(&waker);
-        let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
-        match result {
-            Ok(Poll::Pending) => {
-                let (action, terminal_future) = {
+        loop {
+            let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
+            match result {
+                Ok(Poll::Pending) => {
                     let mut state = lock(&self.state);
-                    let action = state.schedule.pending();
-                    if matches!(action, Pending::Cancel(_)) {
-                        (action, Some(future))
-                    } else {
-                        // No other thread can poll or take this future while
-                        // the state lock performs the Running transition.
-                        state.future = Some(future);
-                        (action, None)
-                    }
-                };
-                match action {
-                    Pending::Requeue => true,
-                    Pending::Idle => false,
-                    Pending::Cancel(reason) => {
-                        self.finish_failure(terminal_future.unwrap(), reason.error());
-                        false
+                    match state.schedule.pending(inline_repolls != 0) {
+                        Pending::Repoll => {
+                            // Authorize the next poll while checking cancellation.
+                            // Running continues to exclude other drivers.
+                            inline_repolls -= 1;
+                        }
+                        Pending::Idle => {
+                            state.future = Some(future);
+                            return;
+                        }
+                        Pending::Requeue => {
+                            state.future = Some(future);
+                            drop(state);
+                            self.enqueue();
+                            return;
+                        }
+                        Pending::Cancel(reason) => {
+                            drop(state);
+                            self.finish_failure(future, reason.error());
+                            return;
+                        }
                     }
                 }
-            }
-            Ok(Poll::Ready(())) => {
-                lock(&self.state).schedule.complete();
-                // Success was published by the wrapper. A destructor panic
-                // cannot replace that already delivered result.
-                let _ = drop_future(future);
-                self.finished();
-                false
-            }
-            Err(payload) => {
-                lock(&self.state).schedule.complete();
-                self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
-                false
+                Ok(Poll::Ready(())) => {
+                    lock(&self.state).schedule.complete();
+                    // Success was published by the wrapper. A destructor panic
+                    // cannot replace that already delivered result.
+                    let _ = drop_future(future);
+                    self.finished();
+                    return;
+                }
+                Err(payload) => {
+                    lock(&self.state).schedule.complete();
+                    self.finish_failure(future, JoinError::Panicked(panic_message(payload)));
+                    return;
+                }
             }
         }
     }
@@ -756,6 +748,58 @@ mod tests {
     }
 
     #[test]
+    fn inline_budget_publishes_a_single_runnable_when_exhausted() {
+        let mut polls = 0;
+        let (scheduler, task, mut join) = setup(std::future::poll_fn(move |cx| {
+            polls += 1;
+            if polls == 4 {
+                Poll::Ready(polls)
+            } else {
+                cx.waker().wake_by_ref();
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }));
+        assert!(Arc::ptr_eq(
+            &lock(&scheduler.queue).pop_front().unwrap(),
+            &task
+        ));
+        task.run_budget(2);
+        assert!(poll_join(&mut join).is_pending());
+        assert_eq!(scheduler.len(), 1);
+        assert!(scheduler.run());
+        assert_eq!(poll_join(&mut join), Poll::Ready(Ok(4)));
+        assert_eq!(scheduler.len(), 0);
+        assert_eq!(scheduler.finished.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shutdown_during_an_inline_poll_stops_the_next_repoll() {
+        let holder: Arc<Mutex<Option<Weak<Task>>>> = Arc::new(Mutex::new(None));
+        let inner = holder.clone();
+        let mut polls = 0;
+        let (scheduler, task, mut join) = setup(std::future::poll_fn(move |cx| {
+            polls += 1;
+            if polls == 2 {
+                let task = lock(&inner).as_ref().unwrap().upgrade().unwrap();
+                task.shutdown();
+            }
+            assert!(polls <= 2);
+            cx.waker().wake_by_ref();
+            Poll::<()>::Pending
+        }));
+        *lock(&holder) = Some(Arc::downgrade(&task));
+        assert!(Arc::ptr_eq(
+            &lock(&scheduler.queue).pop_front().unwrap(),
+            &task
+        ));
+        task.run_budget(8);
+        assert_eq!(poll_join(&mut join), Poll::Ready(Err(JoinError::Shutdown)));
+        assert_eq!(scheduler.finished.load(Ordering::SeqCst), 1);
+        assert_eq!(scheduler.len(), 0);
+    }
+
+    #[test]
     fn abort_before_poll_and_abort_idle_drop_once() {
         for already_polled in [false, true] {
             let (future, polls, drops) = tracked(0);
@@ -858,9 +902,9 @@ mod tests {
             let mut enqueue_count = 0;
             if wake_first {
                 enqueue_count += usize::from(state.wake());
-                enqueue_count += usize::from(state.pending() == Pending::Requeue);
+                enqueue_count += usize::from(state.pending(false) == Pending::Requeue);
             } else {
-                assert_eq!(state.pending(), Pending::Idle);
+                assert_eq!(state.pending(false), Pending::Idle);
                 enqueue_count += usize::from(state.wake());
             }
             assert_eq!(state.phase, Phase::Queued);
@@ -877,9 +921,9 @@ mod tests {
             assert_eq!(state.begin(), Begin::Poll);
             if abort_first {
                 assert!(!state.abort());
-                assert_eq!(state.pending(), Pending::Cancel(CancelReason::Abort));
+                assert_eq!(state.pending(false), Pending::Cancel(CancelReason::Abort));
             } else {
-                assert_eq!(state.pending(), Pending::Idle);
+                assert_eq!(state.pending(false), Pending::Idle);
                 assert!(state.abort());
                 assert_eq!(state.begin(), Begin::Cancel(CancelReason::Abort));
             }
