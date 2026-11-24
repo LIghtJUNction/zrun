@@ -385,25 +385,39 @@ fn exit_code(code: i32) -> u8 {
 }
 
 #[cfg(target_os = "linux")]
+fn read_batch(
+    input: impl io::BufRead,
+) -> Result<Vec<execution::Request>, Box<dyn std::error::Error>> {
+    use std::io::BufRead;
+
+    let mut input = input.take(execution::Batch::MAX_INPUT as u64 + 1);
+    let mut line = String::new();
+    let mut requests: Result<_, serde_json::Error> = Ok(Vec::new());
+    while input.read_line(&mut line)? != 0 {
+        if input.limit() == 0 {
+            return Err("batch input exceeds the byte limit".into());
+        }
+        if !line.trim().is_empty() {
+            // Retain the first parse error, but consume stdin so producers
+            // can send their entire batch and the byte limit still applies.
+            requests = requests.and_then(|mut requests| {
+                requests.push(serde_json::from_str::<execution::Request>(&line)?);
+                Ok(requests)
+            });
+        }
+        line.clear();
+    }
+    Ok(requests?)
+}
+
+#[cfg(target_os = "linux")]
 fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::error::Error>> {
-    use execution::{Batch, Request};
+    use execution::Request;
 
     let requests = if let Some(script) = script {
         vec![Request::new(script)]
     } else {
-        let mut input = String::new();
-        io::stdin()
-            .lock()
-            .take(Batch::MAX_INPUT as u64 + 1)
-            .read_to_string(&mut input)?;
-        if input.len() > Batch::MAX_INPUT {
-            return Err("batch input exceeds the byte limit".into());
-        }
-        let requests: Result<Vec<_>, _> = input
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect();
+        let requests = read_batch(io::stdin().lock())?;
         let mut output = io::stdout().lock();
         #[derive(serde::Serialize)]
         struct Record {
@@ -411,7 +425,7 @@ fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::er
             #[serde(flatten)]
             delivery: execution::Delivery,
         }
-        execute_batch(shell, requests?, |index, delivery| {
+        execute_batch(shell, requests, |index, delivery| {
             serde_json::to_writer(&mut output, &Record { index, delivery })?;
             writeln!(output)
         })?;

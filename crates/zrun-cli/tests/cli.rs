@@ -278,6 +278,42 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
 }
 
 #[test]
+fn batch_input_accepts_crlf_and_final_unterminated_record() {
+    let mut command = zrun();
+    command.arg("batch");
+    let output = process_input(
+        command,
+        " \r\n{\"script\":\"printf first\"}\r\n{\"script\":\"printf second\"}",
+    );
+    let records = lines(&output);
+    assert_eq!(records.len(), 2);
+    for record in records {
+        let text = if record["index"] == 0 {
+            "first"
+        } else {
+            "second"
+        };
+        assert_eq!(record["result"]["stdout"]["data"], text);
+    }
+}
+
+#[test]
+fn batch_input_keeps_the_total_limit_after_a_parse_error() {
+    let directory = Directory::new();
+    let mut command = zrun();
+    command.current_dir(&directory.0).arg("batch");
+    let mut input = format!(
+        "{{\"script\":\"touch executed\"}}\ninvalid JSON\n{}",
+        " \n".repeat(1024 * 1024)
+    );
+    input.truncate(2 * 1024 * 1024 + 1);
+    let output = process_input(command, &input);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("input exceeds the byte limit"));
+    assert!(!directory.0.join("executed").exists());
+}
+
+#[test]
 fn local_batch_delivers_each_result_without_waiting_for_the_next_command() {
     let directory = Directory::new();
     let mut child = zrun()
