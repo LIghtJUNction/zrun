@@ -6,7 +6,7 @@ use std::path::Path;
 use std::pin::pin;
 use std::process::{Command, Stdio};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zrun::Timer;
 use zrun::io::{AsyncFd, Handle};
@@ -40,13 +40,14 @@ pub(crate) async fn execute(
     if let Some(cwd) = request.cwd {
         command.current_dir(cwd);
     }
+    let expires = Instant::now() + Duration::from_millis(request.timeout_ms);
     let mut group = ChildGroup::new(zrun::process::spawn(&mut command, io)?);
     let child = group.child.as_mut().expect("the new group owns its child");
     let mut stdout = child.take_stdout()?.expect("stdout was piped");
     let mut stderr = child.take_stderr()?.expect("stderr was piped");
     let mut out = Capture::default();
     let mut err = Capture::default();
-    let deadline = timer.sleep(Duration::from_millis(request.timeout_ms));
+    let deadline = timer.sleep_until(expires);
 
     let timed_out = {
         let mut out_read = pin!(out.drain(&mut stdout, max_output));

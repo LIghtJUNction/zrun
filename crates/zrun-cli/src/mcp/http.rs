@@ -4,13 +4,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zrun::Timer;
 use zrun::io::{Listener, Stream, UnixListener};
 
 use super::reply::Reply;
-use super::{MAX_MESSAGE, deadline, respond, supports_protocol};
+use super::{MAX_MESSAGE, deadline, deadline_at, respond, supports_protocol};
 use crate::execution::Broker;
 use crate::executor::{Executor, Spawner};
 
@@ -705,18 +705,21 @@ pub(super) async fn post(
         return Err(invalid("client MCP message exceeds the size limit"));
     }
     validate_directory(path)?;
-    let mut stream = deadline(io.connect_unix(path), timer, CLIENT_IO_TIMEOUT).await??;
+    // Connection and upload share one transport budget. Waiting for the
+    // command result below has a separate allowance.
+    let upload_expires = Instant::now() + CLIENT_IO_TIMEOUT;
+    let mut stream = deadline_at(io.connect_unix(path), timer, upload_expires).await??;
     let header = format!(
         "POST /mcp HTTP/1.1\r\nHost: zrun\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n",
         message.len()
     );
-    deadline(
+    deadline_at(
         async {
             stream.write_all(header.as_bytes()).await?;
             stream.write_all(message).await
         },
         timer,
-        CLIENT_IO_TIMEOUT,
+        upload_expires,
     )
     .await??;
     let mut response_frame = Frame::new(None);

@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::pin::pin;
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -301,10 +302,18 @@ async fn execute_call(
 async fn deadline<F: Future>(
     future: F,
     timer: &zrun::Timer,
-    duration: std::time::Duration,
+    duration: Duration,
+) -> io::Result<F::Output> {
+    deadline_at(future, timer, Instant::now() + duration).await
+}
+
+async fn deadline_at<F: Future>(
+    future: F,
+    timer: &zrun::Timer,
+    expires: Instant,
 ) -> io::Result<F::Output> {
     let mut future = pin!(future);
-    let mut deadline = pin!(timer.sleep(duration));
+    let mut deadline = pin!(timer.sleep_until(expires));
     std::future::poll_fn(|cx| {
         if let Poll::Ready(value) = future.as_mut().poll(cx) {
             return Poll::Ready(Ok(value));
