@@ -453,14 +453,31 @@ async fn remote_records(
     Ok(records)
 }
 
-pub(crate) async fn remote_one(
-    io: &zrun::io::Handle,
-    path: &std::path::Path,
-    request: Request,
-    timer: &zrun::Timer,
-) -> io::Result<Delivery> {
-    let payload = remote_payload(0, &[request])?;
-    let mut client = http::UnixClient::new(io, path, timer, false);
-    let mut records = remote_records(&mut client, &payload, 0, 1).await?;
-    Ok(records.remove(0))
+#[derive(Default)]
+pub(crate) struct RemotePool {
+    idle: std::sync::Mutex<Vec<http::IdleStream>>,
+}
+
+impl RemotePool {
+    pub(crate) async fn run_one(
+        &self,
+        io: &zrun::io::Handle,
+        path: &std::path::Path,
+        request: Request,
+        timer: &zrun::Timer,
+    ) -> io::Result<Delivery> {
+        const MAX_IDLE: usize = 8;
+
+        let payload = remote_payload(0, &[request])?;
+        let mut client = http::UnixClient::new(io, path, timer, true);
+        client.saved = self.idle.lock().unwrap().pop();
+        let mut records = remote_records(&mut client, &payload, 0, 1).await?;
+        if let Some(stream) = client.saved.take() {
+            let mut idle = self.idle.lock().unwrap();
+            if idle.len() < MAX_IDLE {
+                idle.push(stream);
+            }
+        }
+        Ok(records.remove(0))
+    }
 }

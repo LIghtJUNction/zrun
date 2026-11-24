@@ -157,6 +157,7 @@ pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result
     let steps = parse_with_args(source, Arc::new(args))?;
     if let Some(path) = std::env::var_os("ZRUN_SOCKET") {
         let path = std::sync::Arc::new(PathBuf::from(path));
+        let pool = Arc::new(crate::mcp::RemotePool::default());
         let cwd = std::env::current_dir()?;
         let mut runtime = crate::executor::Executor::current()?;
         let spawner = runtime.spawner();
@@ -174,9 +175,11 @@ pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result
                     );
                     let (sender, receiver) = zrun::sync::channel();
                     let (io, path, timer) = (io.clone(), path.clone(), timer.clone());
+                    let pool = Arc::clone(&pool);
                     spawner
                         .spawn(async move {
-                            let delivery = crate::mcp::remote_one(&io, &path, request, &timer)
+                            let delivery = pool
+                                .run_one(&io, &path, request, &timer)
                                 .await
                                 .unwrap_or_else(Delivery::rejected);
                             let _ = sender.send(delivery);

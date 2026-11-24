@@ -710,12 +710,14 @@ impl Drop for SocketPath {
     }
 }
 
+pub(super) struct IdleStream(Stream, Instant);
+
 pub(super) struct UnixClient<'a> {
     io: &'a zrun::io::Handle,
     path: &'a Path,
     timer: &'a Timer,
     reuse: bool,
-    saved: Option<(Stream, Instant)>,
+    pub(super) saved: Option<IdleStream>,
 }
 
 impl<'a> UnixClient<'a> {
@@ -743,7 +745,7 @@ impl<'a> UnixClient<'a> {
         let started = Instant::now();
         let upload_expires = started + CLIENT_IO_TIMEOUT;
         let mut stream = match self.saved.take() {
-            Some((stream, expires)) if started < expires => stream,
+            Some(IdleStream(stream, expires)) if started < expires => stream,
             _ => {
                 validate_directory(self.path)?;
                 deadline_at(self.io.connect_unix(self.path), self.timer, upload_expires).await??
@@ -872,7 +874,7 @@ impl<'a> UnixClient<'a> {
         if keep_alive {
             // Bound reuse conservatively from before the exchange, so an idle
             // session does not normally outlive the server's read deadline.
-            self.saved = Some((stream, started + Duration::from_secs(10)));
+            self.saved = Some(IdleStream(stream, started + Duration::from_secs(10)));
         }
         Ok((!accepted).then(|| bytes.split_off(first_body)))
     }
