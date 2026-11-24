@@ -130,3 +130,5 @@ Linux 7.3.5-arch1-1、Intel Core i9-12900HX、Rust 1.100.0，release 进程固�
 | 1.270 [1.135, 1.296] | 1.074 [1.000, 1.165] | 0.759 [0.680, 0.805] | 0.762 [0.680, 0.807] | 1.058 [1.019, 1.099] |
 
 工作区测试和严格 Clippy 通过。组合候选确认出现尾延迟回退，未合入。报告在 `dist/zrun-oldest-steal-{matrix,tail}-w16/report.json`，增量补丁在 `dist/zrun-oldest-steal-experiment.patch`。
+
+候选 `3c91312` 单独测试队首窃取，未包含提示位。沿用相同基线和采样设置，共 132 个样本通过。创建回收吞吐为 0.844 [0.770, 0.882]，唤醒吞吐为 0.884 [0.846, 0.917]，每次唤醒 CPU 为 1.247 [1.195, 1.328]，自唤醒 P99 为 1.055 [0.997, 1.142]，跨线程 P99 为 1.243 [1.181, 1.279]。单独改变取出顺序也出现回退。候选未合入，报告在 `dist/zrun-oldest-only-{matrix,tail}-w16/report.json`，补丁在 `dist/zrun-oldest-only-experiment.patch`。
