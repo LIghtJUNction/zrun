@@ -144,6 +144,55 @@ fn concurrent_admission_uses_all_slots_and_releases_cancelled_tasks() {
 }
 
 #[test]
+fn shutdown_resolves_every_task_admitted_by_racing_producers() {
+    const CAPACITY: usize = 67;
+    const PRODUCERS: usize = 8;
+    let mut pool = Pool::with_max_tasks(4, CAPACITY).expect("start bounded pool");
+    let spawner = pool.spawner();
+    let start = Barrier::new(PRODUCERS + 1);
+    let tasks = thread::scope(|scope| {
+        let producers: Vec<_> = (0..PRODUCERS)
+            .map(|_| {
+                let spawner = spawner.clone();
+                let start = &start;
+                scope.spawn(move || {
+                    let first = spawner
+                        .spawn(pending::<()>())
+                        .expect("admit an initial task");
+                    let mut tasks = vec![first];
+                    start.wait();
+                    for _ in 0..CAPACITY {
+                        match spawner.spawn(pending::<()>()) {
+                            Ok(task) => tasks.push(task),
+                            Err(SpawnError::Shutdown | SpawnError::AtCapacity { .. }) => break,
+                            Err(error) => panic!("unexpected admission failure: {error}"),
+                        }
+                    }
+                    tasks
+                })
+            })
+            .collect();
+        start.wait();
+        pool.shutdown();
+        producers
+            .into_iter()
+            .flat_map(|producer| producer.join().expect("producer finishes"))
+            .collect::<Vec<_>>()
+    });
+    assert!((PRODUCERS..=CAPACITY).contains(&tasks.len()));
+    assert_eq!(pool.stats().active_tasks, 0);
+    assert_eq!(pool.stats().queued_tasks, 0);
+    assert!(matches!(spawner.spawn(async {}), Err(SpawnError::Shutdown)));
+    for task in tasks {
+        assert!(
+            task.is_finished(),
+            "shutdown must resolve every admitted task"
+        );
+        assert_eq!(pool.block_on(task), Err(JoinError::Shutdown));
+    }
+}
+
+#[test]
 fn a_task_can_drop_its_pool_without_joining_its_own_thread() {
     let pool = Pool::new(2).expect("start workers");
     let spawner = pool.spawner();

@@ -16,9 +16,11 @@
 
 调度批次与定时器短路径已做同机筛选。单 worker 的唤醒吞吐、CPU 和内存已有同时过线的候选，2 worker 创建与回收及 16 worker CPU 回归可复现。[调度对照、复测和命令服务回归](measurements/caller-timer-experiments-linux-20261124.md)
 
+多线程任务登记分片已合入。2、4 worker 的创建与回收及唤醒负载的 CPU 开销均有改善。4 worker 的新一轮 24 小时长测已启动。[分片实测](measurements/sharded-registry-linux-20261124.md)
+
 ## P2：TCP IO
 
-可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。当前版 Linux 回环 TCP 的 24 个指标格有 4 个过线，覆盖 8 worker 的一档吞吐和三档往返 P99。更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/compact-task-linux-20261124.md)
+可选 `io` 模块已有由 Mio 驱动的 TCP、Unix socket 与 Unix 文件描述符就绪通知。它在 Linux 使用 epoll。注册令牌在单个 reactor 内不重复，停止驱动会唤醒等待者。单 worker 用同一线程推进任务和 I/O。分片版 Linux 回环 TCP 的 24 个指标格有 2 个过线，覆盖 8 worker 的两档往返 P99。更完整的连接与背压测试继续验收。io_uring 单独作为实验。[当前同版本 Tokio 对照](measurements/sharded-registry-linux-20261124.md)
 
 ## P3：平台与优化
 

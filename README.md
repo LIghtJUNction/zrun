@@ -4,7 +4,7 @@ zrun 提供独立的 Rust 异步运行时和面向 AI agent 的 Linux 命令执�
 
 运行时的长期目标是成为 Tokio 的替代选项。当前核心提供 **P0 单线程调度器、任务生命周期、定时器和结果通道**，另外通过 `io` feature 提供异步 TCP、Unix socket 和 Unix 文件描述符。单线程可以用 `Runtime::block_on_with_io` 同时推进任务、定时器和 I/O。Tokio 位于独立比较程序，多线程候选 `Pool` 与性能门槛见[阶段计划](docs/plan.md)。
 
-**0.1.0-p0.2** 是 P0 预览版本。Unix 消费者可启用 `process` feature 以启动并监督子进程，通过 zrun reactor 读写管道。活动任务以连续薄引用数组登记，小 Future 和结果槽与任务头共享分配。[预览发行说明](docs/releases/0.1.0-p0.2.md) · [当前设计](docs/design.md) · [Linux 实测](docs/measurements/compact-task-linux-20261124.md)
+**0.1.0-p0.2** 是 P0 预览版本。Unix 消费者可启用 `process` feature 以启动并监督子进程，通过 zrun reactor 读写管道。多线程 Pool 将任务登记分片，小 Future 和结果槽与任务头共享分配。[预览发行说明](docs/releases/0.1.0-p0.2.md) · [当前设计](docs/design.md) · [Linux 实测](docs/measurements/sharded-registry-linux-20261124.md)
 
 
 ## 执行命令
