@@ -37,3 +37,11 @@
 - `zrun-ready-hint-tail-retake-w{4,8,16}/report.json` 与 `zrun-ready-hint-tokio-w16/report.json`
 - `zrun-ready-{base,hint}-w16-spawn.er` 与对应 profile 文本
 - `zrun-ready-main-agent-2000.jsonl` 与 `zrun-ready-transport-reuse.log`
+
+## 休眠前完整复查的结果
+
+候选 `153481d` 在 worker 进入休眠前保留完整的窃取扫描。相对 `acef955`，16 worker、100,000 任务的创建与回收吞吐为 1.193 [1.100, 1.370]，唤醒吞吐为 1.096 [1.033, 1.169]，每次唤醒 CPU 开销为 0.740 [0.696, 0.785]。8 worker 的创建与回收吞吐为 1.127 [1.032, 1.239]。
+
+每档 24 对独立进程复测跨线程 P99。16 worker 比值为 1.082 [1.031, 1.164]，回退可复现。8 worker 比值为 1.017 [0.0013, 343.718]，首轮回退幅度未复现，复测区间仍很宽。该候选保持实验状态。
+
+同一构建在 16 worker 对 Tokio 的创建与回收吞吐为 0.422，唤醒吞吐为 0.453，每次唤醒 CPU 开销为 1.904。原始报告为 `zrun-ready-recheck-ab-w{8,16}/report.json`、`zrun-ready-recheck-tail-retake-w{8,16}/report.json` 和 `zrun-ready-recheck-tokio-w16/report.json`。
