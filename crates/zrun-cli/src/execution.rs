@@ -23,7 +23,7 @@ const MAX_COMMANDS: usize = 4_096;
 const MAX_SCRIPT: usize = 65_536;
 const MAX_TIMEOUT_MS: u64 = 3_600_000;
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
-const MAX_OUTPUT: usize = 65_536;
+pub(crate) const MAX_OUTPUT: usize = 65_536;
 const PARALLEL: usize = 32;
 const ADMISSION_CHUNK: usize = 8;
 const BATCH_WINDOW: usize = 128;
@@ -178,6 +178,10 @@ impl EncodedResult {
 }
 
 impl ResultRecord {
+    pub(crate) fn cacheable(&self) -> bool {
+        self.exit_code == 0 && !self.truncated && self.error.is_none()
+    }
+
     fn error(error: io::Error) -> Self {
         Self {
             exit_code: 125,
@@ -321,12 +325,14 @@ impl Cache {
         (entry.expires > Instant::now()).then(|| entry.result.clone())
     }
 
-    fn insert(&mut self, key: Arc<Key>, result: Arc<ResultRecord>, command_bytes: usize) {
-        if key.reuse.ttl_ms == 0
-            || result.exit_code != 0
-            || result.truncated
-            || result.error.is_some()
-        {
+    fn insert(
+        &mut self,
+        key: Arc<Key>,
+        result: Arc<ResultRecord>,
+        command_bytes: usize,
+        expires: Instant,
+    ) {
+        if key.reuse.ttl_ms == 0 || !result.cacheable() || expires <= Instant::now() {
             return;
         }
         // Account allocated buffer capacity and bound metadata independently by entry count.
@@ -349,7 +355,6 @@ impl Cache {
                 .expect("the eviction key is present");
             self.bytes -= entry.size;
         }
-        let expires = Instant::now() + Duration::from_millis(key.reuse.ttl_ms);
         self.bytes += size;
         self.order.push_back(key.clone());
         self.entries.insert(
@@ -392,6 +397,7 @@ struct Shared {
     state: Mutex<State>,
     gate: Mutex<Gate>,
     plugin: Option<Plugin>,
+    valkey: Option<crate::valkey::Valkey>,
     shell: PathBuf,
     directory: PathBuf,
     output_budget: Arc<Budget>,
@@ -422,6 +428,7 @@ impl Broker {
             }),
             gate: Mutex::new(Gate::from_env()?),
             plugin: Plugin::from_env()?,
+            valkey: crate::valkey::Valkey::from_env(&shell)?,
             shell,
             directory: std::env::current_dir()?,
             output_budget: Budget::new(MAX_ENCODED_OUTPUT),
@@ -631,17 +638,45 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
             job.map_or(Poll::Pending, Poll::Ready)
         })
         .await;
-        let result = Arc::new(
-            process::execute(
-                &shared.shell,
-                job.request,
-                &shared.io,
-                &shared.timer,
-                MAX_OUTPUT,
-            )
-            .await
-            .unwrap_or_else(ResultRecord::error),
-        );
+        let remote = shared.valkey.as_ref().and_then(|cache| {
+            let key = cache.key(&job.request)?;
+            let ttl = job.request.reuse.as_ref()?.ttl_ms;
+            Some((cache, key, ttl))
+        });
+        let hit = match &remote {
+            Some((cache, key, ttl)) => cache.get(&shared.io, &shared.timer, key, *ttl).await,
+            None => None,
+        };
+        let cached = hit.is_some();
+        let (result, expires) = match hit {
+            Some((result, expires)) => (result, Some(expires)),
+            None => {
+                let result = process::execute(
+                    &shared.shell,
+                    job.request,
+                    &shared.io,
+                    &shared.timer,
+                    MAX_OUTPUT,
+                )
+                .await
+                .unwrap_or_else(ResultRecord::error);
+                let expires = match &job.completion {
+                    Completion::Shared(key) => {
+                        Some(Instant::now() + Duration::from_millis(key.reuse.ttl_ms))
+                    }
+                    Completion::Single(_) => None,
+                };
+                if let Some((cache, key, ttl)) = remote
+                    && result.cacheable()
+                {
+                    cache
+                        .set(&shared.io, &shared.timer, &key, ttl, &result)
+                        .await;
+                }
+                (result, expires)
+            }
+        };
+        let result = Arc::new(result);
         let subscribers = {
             let mut state = shared.state.lock().expect("broker state poisoned");
             let subscribers = match job.completion {
@@ -651,7 +686,9 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
                         .in_flight
                         .remove(&key)
                         .expect("shared job has subscribers");
-                    state.cache.insert(key, result.clone(), job.size);
+                    if let Some(expires) = expires {
+                        state.cache.insert(key, result.clone(), job.size, expires);
+                    }
                     subscribers
                 }
             };
@@ -664,6 +701,11 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
             disposition,
         } in subscribers
         {
+            let disposition = if cached && matches!(disposition, Disposition::Executed) {
+                Disposition::Cached
+            } else {
+                disposition
+            };
             let _ = sender.send(Delivery {
                 disposition,
                 result: result.clone(),

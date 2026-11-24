@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 zrun = { version = "=0.1.0-p0.7", path = "../..", features = ["process"] }
 httparse = "1.10"
+sha2 = "0.10.9"
 signal-hook = "0.3"
 z64 = { git = "https://github.com/LIghtJUNction/z64.git" }
 zguard = { git = "https://github.com/LIghtJUNction/zguard.git" }

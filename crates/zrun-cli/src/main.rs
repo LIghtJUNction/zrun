@@ -26,6 +26,8 @@ mod policy;
 mod process;
 #[cfg(target_os = "linux")]
 mod script;
+#[cfg(target_os = "linux")]
+mod valkey;
 
 const HELP: &str = "Usage:
   zrun [shell arguments...]       Enter the configured terminal shell

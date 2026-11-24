@@ -1,0 +1,211 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zrun::Timer;
+use zrun::io::{Handle, Stream};
+
+use crate::execution::{Request, ResultRecord};
+
+const TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_VALUE: usize = 800 * 1024;
+
+pub(crate) struct Valkey {
+    path: PathBuf,
+    prefix: String,
+    environment: Sha256,
+}
+
+#[derive(Serialize)]
+struct Stored<'a> {
+    expires_ms: u64,
+    result: &'a ResultRecord,
+}
+
+#[derive(Deserialize)]
+struct Received {
+    expires_ms: u64,
+    result: ResultRecord,
+}
+
+impl Valkey {
+    pub(crate) fn from_env(shell: &Path) -> io::Result<Option<Self>> {
+        let Some(path) = std::env::var_os("ZRUN_VALKEY_SOCKET").map(PathBuf::from) else {
+            return Ok(None);
+        };
+        let domain = std::env::var("ZRUN_VALKEY_DOMAIN").unwrap_or_default();
+        let revision = std::env::var("ZRUN_VALKEY_TOOL_REVISION").unwrap_or_default();
+        if !path.is_absolute()
+            || domain.is_empty()
+            || domain.len() > 64
+            || !domain
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || revision.is_empty()
+            || revision.len() > 256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Valkey requires an absolute socket, a domain and a tool revision",
+            ));
+        }
+        let mut environment = Sha256::new();
+        for part in [
+            env!("CARGO_PKG_VERSION").as_bytes(),
+            shell.as_os_str().as_encoded_bytes(),
+            revision.as_bytes(),
+        ] {
+            digest_part(&mut environment, part);
+        }
+        let mut vars: Vec<_> = std::env::vars_os().collect();
+        vars.sort_unstable();
+        for (name, value) in vars {
+            digest_part(&mut environment, name.as_encoded_bytes());
+            digest_part(&mut environment, value.as_encoded_bytes());
+        }
+        Ok(Some(Self {
+            path,
+            prefix: format!("zrun:v1:{domain}:"),
+            environment,
+        }))
+    }
+
+    pub(crate) fn key(&self, request: &Request) -> Option<String> {
+        request.reuse.as_ref().filter(|reuse| reuse.ttl_ms > 0)?;
+        let mut hash = self.environment.clone();
+        digest_part(&mut hash, &serde_json::to_vec(request).ok()?);
+        Some(format!("{}{:x}", self.prefix, hash.finalize()))
+    }
+
+    pub(crate) async fn get(
+        &self,
+        io: &Handle,
+        timer: &Timer,
+        key: &str,
+        ttl: u64,
+    ) -> Option<(ResultRecord, Instant)> {
+        timer
+            .timeout_at(Instant::now() + TIMEOUT, async {
+                let mut socket = io.connect_unix(&self.path).await.ok()?;
+                socket
+                    .write_all(&command(&[b"GET", key.as_bytes()]))
+                    .await
+                    .ok()?;
+                let size = read_size(&mut socket).await?;
+                let mut payload = vec![0; size + 2];
+                read_exact(&mut socket, &mut payload).await?;
+                if payload[size..] != *b"\r\n" {
+                    return None;
+                }
+                let hit: Received = serde_json::from_slice(&payload[..size]).ok()?;
+                if !hit.result.cacheable()
+                    || hit.result.stdout.len() > crate::execution::MAX_OUTPUT
+                    || hit.result.stderr.len() > crate::execution::MAX_OUTPUT
+                {
+                    return None;
+                }
+                let remaining = hit.expires_ms.checked_sub(now_ms()?)?.min(ttl);
+                (remaining > 0).then(|| {
+                    (
+                        hit.result,
+                        Instant::now() + Duration::from_millis(remaining),
+                    )
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) async fn set(
+        &self,
+        io: &Handle,
+        timer: &Timer,
+        key: &str,
+        ttl: u64,
+        result: &ResultRecord,
+    ) {
+        let Some(expires_ms) = now_ms().and_then(|now| now.checked_add(ttl)) else {
+            return;
+        };
+        let Ok(value) = serde_json::to_vec(&Stored { expires_ms, result }) else {
+            return;
+        };
+        if value.len() > MAX_VALUE {
+            return;
+        }
+        let expiry = ttl.to_string();
+        let _ = timer
+            .timeout_at(Instant::now() + TIMEOUT, async {
+                let mut socket = io.connect_unix(&self.path).await.ok()?;
+                socket
+                    .write_all(&command(&[
+                        b"SET",
+                        key.as_bytes(),
+                        &value,
+                        b"PX",
+                        expiry.as_bytes(),
+                    ]))
+                    .await
+                    .ok()?;
+                let mut reply = [0; 5];
+                read_exact(&mut socket, &mut reply).await?;
+                (reply == *b"+OK\r\n").then_some(())
+            })
+            .await;
+    }
+}
+
+fn now_ms() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
+fn digest_part(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_le_bytes());
+    hash.update(bytes);
+}
+
+fn command(args: &[&[u8]]) -> Vec<u8> {
+    let mut message = format!("*{}\r\n", args.len()).into_bytes();
+    for arg in args {
+        message.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+        message.extend_from_slice(arg);
+        message.extend_from_slice(b"\r\n");
+    }
+    message
+}
+
+async fn read_size(socket: &mut Stream) -> Option<usize> {
+    let mut prefix = [0; 1];
+    read_exact(socket, &mut prefix).await?;
+    if prefix != *b"$" {
+        return None;
+    }
+    let mut header = [0; 8];
+    for index in 0..header.len() {
+        read_exact(socket, &mut header[index..=index]).await?;
+        if header[index] == b'\n' {
+            let text = std::str::from_utf8(header[..index].strip_suffix(b"\r")?).ok()?;
+            return text.parse::<usize>().ok().filter(|&size| size <= MAX_VALUE);
+        }
+    }
+    None
+}
+
+async fn read_exact(socket: &mut Stream, mut buf: &mut [u8]) -> Option<()> {
+    while !buf.is_empty() {
+        let count = socket.read(buf).await.ok()?;
+        if count == 0 {
+            return None;
+        }
+        buf = &mut buf[count..];
+    }
+    Some(())
+}

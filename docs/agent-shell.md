@@ -65,6 +65,22 @@ stdio 采用每行一条 JSON-RPC。HTTP 每次 POST 处理一条消息，请求
 
 默认使用单 worker 执行器，直接处理 socket 和命令描述符的就绪事件。设置 `ZRUN_WORKERS=2` 至 `16` 可使用多 worker 候选。多 worker 默认使用独立 I/O 线程。设置 `ZRUN_IO_DRIVER=worker` 可由首个执行 worker 同时驱动 I/O 和定时器。每个服务最多同时运行 32 个命令，最多登记 4,096 个待交付请求。执行中及排队的命令输入合计上限 16 MiB。缓存最多 1,024 项，记录的键和输出缓冲区合计上限 16 MiB。socket 接入最多 2,048 个活动连接。 TCP 和 Unix socket 共用 32 MiB 的 HTTP 接收缓冲预算。请求体上限为 256 KiB。接收缓冲随已收到的数据增长，预算耗尽时返回 HTTP 503，且当次请求未进入命令队列。 MCP 回复共用 32 MiB 的结果编码预算。编码空间不足时，服务暂存已完成的原始结果，在可用空间恢复后交付原有结果。原始抓取缓冲共用独立的 128 MiB 预算。每个请求在执行前一次预留整批空间，空间不足时异步排队。命令完成后按实际占用缩减预留，完成编码后释放。内核 socket 缓冲另计。
 
+## 可选 Valkey 二级缓存
+
+默认只使用进程内合并与结果缓存。显式设置下列变量可启用二级缓存：
+
+```sh
+export ZRUN_VALKEY_SOCKET=/absolute/path/to/valkey.sock
+export ZRUN_VALKEY_DOMAIN=team_a
+export ZRUN_VALKEY_TOOL_REVISION=toolchain-2026-11
+```
+
+对通过授权且 `reuse.ttl_ms > 0` 的调用，zrun 本地未命中后最多等待 50 ms 查询 Valkey。同进程的相同在途请求共用一次查询或执行。命令成功且输出完整时用 `SET … PX` 写入，写入失败不影响命令结果。连接中断、超时或无效值按未命中处理。二级命中回填本地缓存时使用剩余有效期。跨进程共享的是已完成结果。
+
+键以前缀 `zrun:v1:<domain>:` 隔离，摘要包含脚本、位置参数、解析后的目录、超时、原有复用参数、zrun 版本、shell 路径、继承环境和工具版本。更新工具、shell 或会影响结果的执行配置时应更新 `ZRUN_VALKEY_TOOL_REVISION`。工作树与文件输入仍由调用方通过 `input_revision` 标识。选择同一信任域的进程必须信任 Valkey 中的值；使用隔离的 socket 或 Valkey 访问控制限制不同信任域的读写权限。只支持本机 Unix socket。
+
+可用 `python3 scripts/valkey-smoke.py /path/to/zrun` 运行真实 Valkey 验收。该测试启动独立临时实例，需要本机有 `valkey-server` 和 `valkey-cli`。
+
 ## Project Z 集成
 
 - `zrun --zmem interactive run 'cat /proc/self/cgroup'` 用 zmem 启动整个 zrun 实例。常驻服务也可用 `zrun --zmem background mcp --unix PATH`。子命令继承服务的 cgroup，避免每条工作重复创建 zmem scope。
