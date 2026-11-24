@@ -530,6 +530,30 @@ fn plain_script_with_zrun_shebang_uses_configured_shell() {
 }
 
 #[test]
+fn end_of_options_preserves_native_and_plain_dash_prefixed_scripts() {
+    let dir = Directory::new();
+    fs::write(
+        dir.0.join("-native.zrun"),
+        "# zrun:1\nasync job -- printf '<%s>' \"$1\"\nawait job\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.0.join("-plain.zrun"),
+        "#!/bin/sh\nprintf '<%s>' \"$1\"\n",
+    )
+    .unwrap();
+    for file in ["-native.zrun", "-plain.zrun"] {
+        let output = zrun()
+            .current_dir(&dir.0)
+            .args(["--", file, "-argument"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"<-argument>");
+    }
+}
+
+#[test]
 fn native_script_jobs_overlap_and_emit_in_await_order() {
     let dir = Directory::new();
     let path = dir.0.join("overlap.zrun");

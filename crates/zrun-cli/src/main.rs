@@ -57,12 +57,35 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let invoked = argv.next();
     #[cfg(not(unix))]
     drop(invoked);
-    let mut args = argv;
+    let mut args = argv.peekable();
     let first = args.next();
     #[cfg(target_os = "linux")]
-    if let Some(path) = first.as_ref().map(std::path::Path::new)
-        && path.extension().is_some_and(|ext| ext == "zrun")
-    {
+    let first = {
+        let script_operand = if first.as_deref() == Some(OsStr::new("--")) {
+            args.peek().filter(|arg| is_script_operand(arg))
+        } else {
+            first.as_ref().filter(|arg| is_script_operand(arg))
+        };
+        match script_operand {
+            // Ensure a dash-prefixed filename remains an operand when
+            // passed through to a shell or a shebang interpreter.
+            Some(path) => {
+                let path = if path.as_encoded_bytes().starts_with(b"-") {
+                    std::path::Path::new(".").join(path).into_os_string()
+                } else {
+                    path.clone()
+                };
+                if first.as_deref() == Some(OsStr::new("--")) {
+                    args.next();
+                }
+                Some(path)
+            }
+            None => first,
+        }
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(path) = first.as_deref().filter(|arg| is_script_operand(arg)) {
+        let path = std::path::Path::new(path);
         use std::io::Seek;
         let mut file = std::fs::File::open(path)?;
         let mut prefix = Vec::new();
@@ -163,6 +186,11 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             enter_shell(command)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_script_operand(arg: &OsStr) -> bool {
+    std::path::Path::new(arg).extension() == Some(OsStr::new("zrun"))
 }
 
 #[cfg(target_os = "linux")]
