@@ -108,3 +108,15 @@ Linux 7.3.5-arch1-1、Intel Core i9-12900HX、Rust 1.100.0，release 进程固�
 原始数据在 `dist/zrun-speculative-hint-million-w16/report.json`。
 
 对十万任务另跑 30 对独立跨线程尾延迟样本，60 个样本全部通过。P99 比值为 1.043 [1.0159, 1.113]，确认尾延迟回退。该候选没有合入调度器。原始数据在 `dist/zrun-speculative-hint-tail-w16/report.json`，补丁在 `dist/zrun-speculative-hint-experiment.patch`。
+
+## 单个外部唤醒通知空闲 peer
+
+候选 `3ce0963` 在上述提示位实验之上，仅当外部生产者把单个任务放入普通宽线程池的空队列、且队列所属 worker 的通知未被领取时，尝试通知一名其他已登记休眠的 worker。与 `d38ba80` 的 Linux release 对照固定 CPU 0–15、16 worker、100,000 任务。吞吐、CPU 和自唤醒用 12 对进程，跨线程尾延迟用 30 对进程，共 132 个样本通过校验。
+
+| 创建回收吞吐 ↑ | 唤醒吞吐 ↑ | 每次唤醒 CPU ↓ | 自唤醒 P99 ↓ | 跨线程唤醒 P99 ↓ |
+| ---: | ---: | ---: | ---: | ---: |
+| 1.190 [1.143, 1.244] | 1.150 [1.094, 1.193] | 0.713 [0.686, 0.744] | 0.773 [0.725, 0.881] | 1.031 [0.990, 1.079] |
+
+工作区 114 项测试和严格 Clippy 通过，1 项按既有配置忽略。初始数据在 `dist/zrun-external-helper-{matrix,tail}-w16/report.json`。
+
+百万任务与主线的 20 对独立样本中，跨线程 P99 比值为 1.064 [0.977, 1.113]。十万任务与仅使用提示位的候选直接对照 30 对，P99 比值为 0.987 [0.944, 1.031]。两组均未确认补发通知消除了尾延迟回退。未采用该改动，数据在 `dist/zrun-external-helper-{million,vs-hint}-w16/report.json`，增量补丁在 `dist/zrun-external-helper-experiment.patch`。
