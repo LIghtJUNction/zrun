@@ -61,7 +61,7 @@ stdio 采用每行一条 JSON-RPC。HTTP 每次 POST 处理一条消息，请求
 
 省略 `reuse` 时，每次调用分别执行。带 `reuse` 的命令由调用方声明可跨请求复用，并提供覆盖实际读入内容的版本标识。身份由同一服务内的 shell、脚本、规范化目录、超时及复用字段共同决定。`ttl_ms: 0` 只合并在途请求。TTL 大于零时，服务在内存中保存成功且未截断的结果。修改文件、部署、安装、查询实时状态等工作一般需要独立执行，只有调用方能约束其语义。缓存随进程退出清除。 MCP 服务在同一结果的多个响应同时发送时共享输出编码，每条响应各自保有请求 ID 和结果状态。
 
-默认使用单 worker 执行器，直接处理 socket 和命令描述符的就绪事件。设置 `ZRUN_WORKERS=2` 至 `16` 可使用多 worker 候选。每个服务最多同时运行 32 个命令，最多登记 4,096 个待交付请求。执行中及排队的命令输入合计上限 16 MiB。缓存最多 1,024 项，记录的键和输出缓冲区合计上限 16 MiB。socket 接入最多 2,048 个活动连接。
+默认使用单 worker 执行器，直接处理 socket 和命令描述符的就绪事件。设置 `ZRUN_WORKERS=2` 至 `16` 可使用多 worker 候选。每个服务最多同时运行 32 个命令，最多登记 4,096 个待交付请求。执行中及排队的命令输入合计上限 16 MiB。缓存最多 1,024 项，记录的键和输出缓冲区合计上限 16 MiB。socket 接入最多 2,048 个活动连接。 TCP 和 Unix socket 共用 32 MiB 的 HTTP 接收缓冲预算。请求体上限为 256 KiB。接收缓冲随已收到的数据增长，预算耗尽时返回 HTTP 503，且当次请求未进入命令队列。
 
 ## Project Z 集成
 
@@ -87,3 +87,5 @@ python3 scripts/agent-load.py --binary target/release/zrun --agents 1000 --round
 [单线程 I/O 与新版命令服务的验证](measurements/p2-tcp-linux-20261124.md)
 
 [大输出与慢客户端的内存实测](measurements/mcp-output-linux-20261124.md)
+
+[HTTP 请求缓冲与过载恢复实测](measurements/mcp-ingress-linux-20261124.md)
