@@ -142,3 +142,5 @@ python3 scripts/benchmark_tcp.py --binary target/release/zrun-tcp-bench \
   --output artifacts/tcp-linux --workers 1 4 --client-workers 4 \
   --server-affinity 0-7 --client-affinity 8-15
 ```
+
+同一版本的客户端也可用 `--baseline PATH` 对照较早版本的 zrun 服务端。报告此时按两版相等的阈值评估变化，与 Tokio 的阶段门槛分别解读。
