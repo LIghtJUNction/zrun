@@ -16,9 +16,30 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
+pub(crate) fn has_native_header(source: &[u8]) -> bool {
+    let mut lines = source.split_inclusive(|byte| *byte == b'\n');
+    let first = lines.next();
+    let header = if first.is_some_and(|line| line.starts_with(b"#!")) {
+        lines.next()
+    } else {
+        first
+    };
+    header.is_some_and(|line| {
+        line.strip_suffix(b"\r\n")
+            .or_else(|| line.strip_suffix(b"\n"))
+            == Some(HEADER.as_bytes())
+    })
+}
+
 fn parse(source: &str) -> io::Result<Vec<Step>> {
     let mut lines = source.lines().enumerate();
-    if lines.next().map(|(_, line)| line) != Some(HEADER) {
+    let first = lines.next();
+    let header = if first.is_some_and(|(_, line)| line.starts_with("#!")) {
+        lines.next()
+    } else {
+        first
+    };
+    if header.map(|(_, line)| line) != Some(HEADER) {
         return Err(invalid("missing # zrun:1 header"));
     }
     let mut pending = BTreeSet::new();

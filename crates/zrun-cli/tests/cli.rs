@@ -458,7 +458,7 @@ fn zrun_file_without_header_preserves_shell_arguments_and_exit_status() {
     let path = dir.0.join("plain.zrun");
     fs::write(
         &path,
-        "for arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nexit 7\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nexit 7\n",
     )
     .unwrap();
     let output = zrun()
@@ -609,4 +609,28 @@ fn shell_selection_handles_a_path_alias_back_to_zrun() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"fallback");
+}
+
+#[test]
+fn an_executable_native_script_runs_through_its_shebang() {
+    let dir = Directory::new();
+    let path = dir.0.join("native.zrun");
+    fs::write(
+        &path,
+        format!(
+            "#!{}\n# zrun:1\nasync job <<END\nprintf native; exit 37\nEND\nawait job\n",
+            env!("CARGO_BIN_EXE_zrun")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(path)
+        .env("ZRUN_SHELL", "/bin/sh")
+        .env_remove("ZRUN_SOCKET")
+        .env_remove("ZRUN_POLICY")
+        .env_remove("ZRUN_PLUGIN")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(output.stdout, b"native");
 }

@@ -2,6 +2,8 @@
 
 `zrun FILE.zrun` 使用配置的 shell 运行普通脚本，并转交其位置参数。在首行写下 `# zrun:1` 可启用 Linux 上的原生任务编排。
 
+可执行的原生脚本可以用 `#!/usr/bin/env zrun` 作为首行，把 `# zrun:1` 放在第二行。赋予脚本执行权限后，可直接运行 `./FILE.zrun`。
+
 ```sh
 # zrun:1
 async prepare <<COMMAND

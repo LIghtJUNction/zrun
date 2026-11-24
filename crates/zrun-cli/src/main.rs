@@ -65,8 +65,9 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         use std::io::Seek;
         let mut file = std::fs::File::open(path)?;
         let mut prefix = Vec::new();
-        (&mut file).take(10).read_to_end(&mut prefix)?;
-        if prefix.starts_with(b"# zrun:1\n") || prefix.starts_with(b"# zrun:1\r\n") {
+        // Read the Linux shebang window plus enough bytes for the native header.
+        (&mut file).take(256 + 10).read_to_end(&mut prefix)?;
+        if script::has_native_header(&prefix) {
             if args.next().is_some() {
                 return Err("native .zrun programs do not take positional arguments".into());
             }
