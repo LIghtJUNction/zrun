@@ -1,6 +1,6 @@
 [package]
 name = "zrun-cli"
-version = "0.1.0-p0.5"
+version = "0.1.0-p0.6"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
@@ -15,11 +15,11 @@ doc = false
 [target.'cfg(target_os = "linux")'.dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-zrun = { version = "=0.1.0-p0.5", path = "../..", features = ["process"] }
+zrun = { version = "=0.1.0-p0.6", path = "../..", features = ["process"] }
 httparse = "1.10"
 signal-hook = "0.3"
 z64 = { git = "https://github.com/LIghtJUNction/z64.git" }
 zguard = { git = "https://github.com/LIghtJUNction/zguard.git" }
 zplugin = { git = "https://github.com/LIghtJUNction/zplugin.git", features = ["std"] }
-zrun-plugin-api = { version = "=0.1.0-p0.5", path = "../zrun-plugin-api" }
+zrun-plugin-api = { version = "=0.1.0-p0.6", path = "../zrun-plugin-api" }
 libc = "0.2"
