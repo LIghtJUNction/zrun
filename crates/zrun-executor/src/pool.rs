@@ -37,6 +37,7 @@ thread_local! {
 #[derive(Default)]
 struct Worker {
     ready: Mutex<VecDeque<TaskRef>>,
+    has_ready: AtomicBool,
     retained: AtomicUsize,
     parker: Arc<Parker>,
 }
@@ -54,6 +55,7 @@ struct RegistryShard {
 
 struct SharedPool {
     closed: AtomicBool,
+    worker_driven_io: bool,
     route: AtomicUsize,
     limit: usize,
     active: Box<[RegistryShard]>,
@@ -211,7 +213,14 @@ impl SharedPool {
         allow_steal: bool,
     ) -> Option<TaskRef> {
         let worker = &self.workers[own];
-        let pop_ready = || lock(&worker.ready).pop_front();
+        let pop_ready = || {
+            let mut ready = lock(&worker.ready);
+            let task = ready.pop_front();
+            if self.worker_driven_io && task.is_some() && ready.is_empty() {
+                worker.has_ready.store(false, Ordering::Relaxed);
+            }
+            task
+        };
         let mut pop_retained = || {
             let task = retained.pop_front();
             if task.is_some() {
@@ -235,6 +244,11 @@ impl SharedPool {
         let mut batch = std::array::from_fn::<_, STEAL_LIMIT, _>(|_| None);
         let (before, own_and_after) = self.workers.split_at(own);
         for peer in own_and_after[1..].iter().chain(before) {
+            // This is only a steal hint. The owner still locks its queue and
+            // publishes/consumes wake tokens under the existing handshake.
+            if self.worker_driven_io && own != 0 && !peer.has_ready.load(Ordering::Relaxed) {
+                continue;
+            }
             let first = {
                 let mut victim = match peer.ready.try_lock() {
                     Ok(victim) => victim,
@@ -248,14 +262,22 @@ impl SharedPool {
                 for entry in &mut batch[..keep.min(STEAL_LIMIT)] {
                     *entry = victim.pop_back();
                 }
+                if self.worker_driven_io && victim.is_empty() {
+                    peer.has_ready.store(false, Ordering::Relaxed);
+                }
                 first
             };
             // Never hold both worker queue locks. Running the front item
             // before publishing another batch avoids a zero-progress steal.
             if batch[0].is_some() && !self.closed.load(Ordering::Acquire) {
-                let mut local = lock(&self.workers[own].ready);
+                let worker = &self.workers[own];
+                let mut local = lock(&worker.ready);
                 if !self.closed.load(Ordering::Acquire) {
+                    let was_empty = local.is_empty();
                     local.extend(batch.into_iter().flatten().rev());
+                    if self.worker_driven_io && was_empty {
+                        worker.has_ready.store(true, Ordering::Relaxed);
+                    }
                     drop(local);
                     self.notify_peer(own);
                 }
@@ -406,7 +428,11 @@ impl SharedPool {
             if self.closed.load(Ordering::Acquire) {
                 return;
             }
+            let was_empty = ready.is_empty();
             ready.extend(tasks);
+            if self.worker_driven_io && was_empty && !ready.is_empty() {
+                worker.has_ready.store(true, Ordering::Relaxed);
+            }
             ready.len()
         };
         // A worker publishing to its own queue cannot be parked. An external
@@ -536,8 +562,13 @@ impl Pool {
                 capacity: max_tasks / shards + usize::from(index < max_tasks % shards),
             })
             .collect();
+        #[cfg(feature = "io")]
+        let worker_driven_io = poller.is_some();
+        #[cfg(not(feature = "io"))]
+        let worker_driven_io = false;
         let shared = Arc::new(SharedPool {
             closed: AtomicBool::new(false),
+            worker_driven_io,
             route: AtomicUsize::new(0),
             limit: max_tasks,
             active,
@@ -552,10 +583,6 @@ impl Pool {
         // In worker-driven I/O pools, helpers avoid optimistic peer scans
         // to reduce contention on the I/O worker's newly published work.
         // Every helper still scans after arming its park handshake.
-        #[cfg(feature = "io")]
-        let worker_driven_io = poller.is_some();
-        #[cfg(not(feature = "io"))]
-        let worker_driven_io = false;
         for index in 0..workers {
             let shared = pool.shared.clone();
             #[cfg(feature = "io")]
