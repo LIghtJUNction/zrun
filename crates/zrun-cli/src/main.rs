@@ -84,6 +84,10 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             }
             return Ok(script::run(shell()?, &source, positional)?);
         }
+        if let Some(mut command) = shebang_command(&prefix)? {
+            command.arg(path).args(args);
+            return enter_shell(command);
+        }
     }
     match first.as_deref().and_then(OsStr::to_str) {
         Some("--help" | "-h") => {
@@ -159,6 +163,75 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             enter_shell(command)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn shebang_command(prefix: &[u8]) -> io::Result<Option<Command>> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    let Some(line) = prefix.strip_prefix(b"#!") else {
+        return Ok(None);
+    };
+    let line = line.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    if line.len() > 253 || line.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid script shebang",
+        ));
+    }
+    let mut words = line
+        .trim_ascii()
+        .splitn(2, |byte| matches!(byte, b' ' | b'\t'));
+    let interpreter = Path::new(OsStr::from_bytes(words.next().unwrap_or_default()));
+    let argument = words.next().map(<[u8]>::trim_ascii_start);
+    if !interpreter.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "script interpreter must be absolute",
+        ));
+    }
+    if selects_self(interpreter) {
+        return Ok(None);
+    }
+    if interpreter.file_name() == Some(OsStr::new("env")) {
+        let Some(argument) = argument else {
+            return Ok(None);
+        };
+        // GNU env may interpret quoting, assignments and options before
+        // selecting its executable. Handle a plain command name and leave
+        // ambiguous forms to the configured shell so they cannot relaunch us.
+        let target = if let Some(command) = argument.strip_prefix(b"-S ") {
+            command
+                .trim_ascii_start()
+                .split(|byte| matches!(byte, b' ' | b'\t'))
+                .next()
+                .unwrap_or_default()
+        } else {
+            argument
+        };
+        if target.is_empty()
+            || target.starts_with(b"-")
+            || !target.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'.' | b'+')
+            })
+        {
+            return Ok(None);
+        }
+        let target = Path::new(OsStr::from_bytes(target));
+        if matches!(
+            target.file_name().and_then(OsStr::to_str),
+            Some("env" | "zrun")
+        ) || selects_self(target)
+        {
+            return Ok(None);
+        }
+    }
+    let mut command = Command::new(interpreter);
+    if let Some(argument) = argument {
+        command.arg(OsStr::from_bytes(argument));
+    }
+    Ok(Some(command))
 }
 
 fn shell() -> io::Result<PathBuf> {

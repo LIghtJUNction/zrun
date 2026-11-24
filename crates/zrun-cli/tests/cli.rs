@@ -501,6 +501,35 @@ fn zrun_file_without_header_preserves_shell_arguments_and_exit_status() {
 }
 
 #[test]
+fn plain_script_uses_its_shebang_interpreter_and_optional_argument() {
+    let dir = Directory::new();
+    let path = dir.0.join("interpreter.zrun");
+    fs::write(
+        &path,
+        "#!/bin/sh -e\nprintf '<%s>' \"$1\"\nfalse\nprintf ignored\n",
+    )
+    .unwrap();
+    let output = zrun()
+        .env("ZRUN_SHELL", "/bin/false")
+        .arg(path)
+        .arg("two words")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"<two words>");
+}
+
+#[test]
+fn plain_script_with_zrun_shebang_uses_configured_shell() {
+    let dir = Directory::new();
+    let path = dir.0.join("wrapper.zrun");
+    fs::write(&path, "#!/usr/bin/env -S zrun\nprintf wrapped\n").unwrap();
+    let output = zrun().arg(path).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"wrapped");
+}
+
+#[test]
 fn native_script_jobs_overlap_and_emit_in_await_order() {
     let dir = Directory::new();
     let path = dir.0.join("overlap.zrun");

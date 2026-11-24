@@ -1,6 +1,6 @@
 # .zrun 脚本
 
-`zrun FILE.zrun` 使用配置的 shell 运行普通脚本，并转交其位置参数。在首行写下 `# zrun:1` 可启用 Linux 上的原生任务编排。
+在 Linux 上，`zrun FILE.zrun` 优先使用普通脚本首行声明的绝对路径解释器，转交 shebang 的可选参数和脚本位置参数。没有 shebang 、shebang 指向 zrun 或 `env` 的目标无法直接识别时，使用配置的 shell。在首行写下 `# zrun:1` 可启用 Linux 上的原生任务编排。
 
 可执行的原生脚本可以用 `#!/usr/bin/env zrun` 作为首行，把 `# zrun:1` 放在第二行。赋予脚本执行权限后，可直接运行 `./FILE.zrun`。
 
