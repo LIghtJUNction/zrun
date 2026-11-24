@@ -29,11 +29,13 @@ P0 支持跨线程唤醒和通过 Spawner 提交 Send Future，但只有调用 b
 
 任务的调度标记必须区别“已在队列”“正在 poll”“poll 中再次收到 wake”和“已终止”。一个活跃任务同时至多有一个可执行队列项；poll 中的通知会在退出 poll 后保留为下一次调度请求。已经完成的任务收到旧 waker 的通知后，保持终止状态。
 
-Future 的所有权必须在每次转换中明确。执行器取得 poll 权限后暂时拥有 Future；Pending 把它交回任务，Ready、abort、panic 与 shutdown 进入唯一终止路径。任务出队、取消或外部唤醒之间的竞争不能造成两份 Future 所有权，也不能释放正在 poll 的 Future。
+Future 固定在任务存储中。执行器取得 poll 权限后拥有独占访问权，Pending 交还访问权，Ready、abort、panic 与 shutdown 进入唯一终止路径。任务出队、取消或外部唤醒之间的竞争不能造成重复 poll，也不能释放正在 poll 的 Future。
 
-任务把 poll、就绪通知、取消和完成状态保存在同一个原子字节。空闲任务的第一个唤醒取得入队权，运行中的唤醒由当前 poll 处理。调度状态也决定谁能访问 Future 槽。当前 poll 先放回 Future，再以 release 转换交还所有权。下一次成功 claim 以 acquire 同步写入。关闭只有在取得非运行任务的槽并切换到终态时才能取出 Future。内联复 poll 保持 poll 所有权，并在每次授权前检查通知与取消。[实测、Loom 与 Miri](measurements/future-slot-linux-20261124.md)
+任务把 poll、就绪通知、取消和完成状态保存在同一个原子字节。空闲任务的第一个唤醒取得入队权，运行中的唤醒由当前 poll 处理。当前 poll 以 release 转换交还访问权，下一次成功 claim 以 acquire 同步写入。关闭只有在取得非运行任务并切换到终态时才能析构 Future。内联复 poll 保持独占访问权，并在每次授权前检查通知与取消。
 
-RawWaker 中的指针代表一个真实的引用计数所有权。`clone` 增加一次所有权，`wake` 和 `drop` 各消耗传入的那一次，`wake_by_ref` 保留原所有权。注释必须解释每处 from_raw/into_raw 的配对、对象存活期和线程安全条件；正确性测试要覆盖最后一个 waker 释放、完成后的旧 waker、重复 wake 和取消风暴。
+小 Future、任务头和结果共用一次分配。执行引用可以持有和调度任务，join 只保留读取结果和请求取消所需的分配。最后一个执行引用完成收尾后释放其保留位。join 与收尾位都释放后才回收分配。
+
+RawWaker 保存源自整个分配的薄指针。`clone` 增加一个执行引用，拥有型 waker 的 `wake` 和 `drop` 消耗这个引用，`wake_by_ref` 借用原引用。传给 poll 的 waker 借用当前执行引用，Future 通过 clone 获得可独立保存的 waker。测试覆盖最后一个 waker 释放、完成后的旧 waker、重复 wake、取消和有 panic 的析构。[实测、Loom 与 Miri](measurements/compact-task-linux-20261124.md)
 
 park 之前同时检查根 Future 的唤醒标记、就绪队列和最近定时器。检查与 park 之间到达的通知必须由 park/unpark 的令牌语义或等价协议保留，防止“队列已非空，但线程永久睡眠”。单批任务处理需要有限预算，避免大量自唤醒任务长期推迟根 Future 或定时器。
 

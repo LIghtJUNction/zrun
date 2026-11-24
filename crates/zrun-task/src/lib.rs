@@ -330,7 +330,8 @@ impl TaskRef {
     fn finish_failure(&self, error: JoinError) {
         // A panicking destructor is caught after the future has been removed
         // from task state. Cancellation/shutdown retain their original reason.
-        // SAFETY: all callers won a terminal transition with a live future.
+        // SAFETY: all callers won a terminal transition. A prior panic may
+        // have already emptied the slot, which the allocation tracks.
         unsafe { self.discard_future() };
         // A foreign join waker may panic. Lifecycle cleanup still has to retire
         // the task; delivery already consumed the channel's unique sender.
@@ -363,7 +364,7 @@ impl TaskRef {
         }));
     }
 
-    /// The calling protocol must have uniquely claimed a live future for drop.
+    /// The caller must hold the exclusive reservation for the future slot.
     unsafe fn discard_future(&self) {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: the caller owns the only terminal future reservation.
