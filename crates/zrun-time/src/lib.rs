@@ -72,15 +72,6 @@ impl Waiter {
         }
     }
 
-    fn ready(value: Result<(), TimerError>) -> Self {
-        Self {
-            state: Mutex::new(WaitState {
-                status: Status::Ready(value),
-                waker: None,
-            }),
-        }
-    }
-
     fn finish(&self, value: Result<(), TimerError>) {
         let waker = {
             let mut state = lock(&self.state);
@@ -121,10 +112,19 @@ pub struct Timer {
 /// A completed Sleep must not be polled again. Dropping it cancels and removes
 /// any pending driver entry synchronously.
 pub struct Sleep {
+    state: SleepState,
+}
+
+enum SleepState {
+    Registered(RegisteredSleep),
+    Ready(Result<(), TimerError>),
+    Complete,
+}
+
+struct RegisteredSleep {
     inner: Weak<DriverInner>,
-    key: Option<Key>,
+    key: Key,
     waiter: Arc<Waiter>,
-    completed: bool,
 }
 
 // Sleep exposes no pinned references to its separately allocated waiter.
@@ -133,17 +133,15 @@ impl Unpin for Sleep {}
 impl Sleep {
     fn ready(value: Result<(), TimerError>) -> Self {
         Self {
-            inner: Weak::new(),
-            key: None,
-            waiter: Arc::new(Waiter::ready(value)),
-            completed: false,
+            state: SleepState::Ready(value),
         }
     }
+}
 
-    fn deregister(&mut self) {
-        if let Some(key) = self.key.take()
-            && let Some(inner) = self.inner.upgrade()
-        {
+impl RegisteredSleep {
+    fn deregister(&self) {
+        let key = self.key;
+        if let Some(inner) = self.inner.upgrade() {
             let (removed, changed) = {
                 let mut state = lock(&inner.state);
                 let changed = state
@@ -174,8 +172,21 @@ impl Sleep {
         cx: &mut Context<'_>,
         now: impl FnOnce() -> Instant,
     ) -> Poll<Result<(), TimerError>> {
-        assert!(!self.completed, "sleep polled after completion");
-        let expired = self.key.is_some_and(|(deadline, _)| deadline <= now());
+        let result = match &mut self.state {
+            SleepState::Registered(sleep) => sleep.poll(cx, now()),
+            SleepState::Ready(value) => Poll::Ready(*value),
+            SleepState::Complete => panic!("sleep polled after completion"),
+        };
+        if result.is_ready() {
+            self.state = SleepState::Complete;
+        }
+        result
+    }
+}
+
+impl RegisteredSleep {
+    fn poll(&self, cx: &mut Context<'_>, now: Instant) -> Poll<Result<(), TimerError>> {
+        let expired = self.key.0 <= now;
         let mut incoming = Some(cx.waker().clone());
         let (result, previous) = {
             let mut state = lock(&self.waiter.state);
@@ -197,17 +208,13 @@ impl Sleep {
                 }
             }
         };
-        if result.is_ready() {
-            self.completed = true;
-            self.deregister();
-        }
         drop(previous);
         drop(incoming);
         result
     }
 }
 
-impl Drop for Sleep {
+impl Drop for RegisteredSleep {
     fn drop(&mut self) {
         self.deregister();
         let waker = {
@@ -261,10 +268,11 @@ impl Timer {
                     (inner.notify)();
                 }
                 Sleep {
-                    inner: Arc::downgrade(&inner),
-                    key: Some(key),
-                    waiter,
-                    completed: false,
+                    state: SleepState::Registered(RegisteredSleep {
+                        inner: Arc::downgrade(&inner),
+                        key,
+                        waiter,
+                    }),
                 }
             }
             Err(error) => Sleep::ready(Err(error)),
@@ -390,6 +398,13 @@ mod tests {
         Driver::new(capacity, Arc::new(|| {}))
     }
 
+    fn deadline(sleep: &Sleep) -> Instant {
+        let SleepState::Registered(sleep) = &sleep.state else {
+            panic!("expected registered sleep");
+        };
+        sleep.key.0
+    }
+
     fn poll_sleep(sleep: &mut Sleep) -> Poll<Result<(), TimerError>> {
         Pin::new(sleep).poll(&mut Context::from_waker(Waker::noop()))
     }
@@ -463,7 +478,7 @@ mod tests {
     fn polling_an_elapsed_deadline_does_not_wake_the_previous_task() {
         let driver = driver(1);
         let mut sleep = driver.timer().sleep(Duration::from_secs(600));
-        let deadline = sleep.key.unwrap().0;
+        let deadline = deadline(&sleep);
         let count = Arc::new(Counter::default());
         let waker = Waker::from(count.clone());
         let mut context = Context::from_waker(&waker);
@@ -485,7 +500,7 @@ mod tests {
     fn expiry_wakes_latest_waker_and_removes_entry() {
         let driver = driver(1);
         let mut sleep = driver.timer().sleep(Duration::from_secs(86_400));
-        let deadline = sleep.key.unwrap().0;
+        let deadline = deadline(&sleep);
         let first = Arc::new(Counter::default());
         let second = Arc::new(Counter::default());
         let first_waker = Waker::from(first.clone());
@@ -540,7 +555,7 @@ mod tests {
         let driver = driver(2);
         let timer = driver.timer();
         let mut sleep = timer.sleep(Duration::from_secs(86_400));
-        let deadline = sleep.key.unwrap().0;
+        let deadline = deadline(&sleep);
         let counter = Arc::new(Counter::default());
         let waker = Waker::from(counter.clone());
         assert!(
@@ -560,7 +575,7 @@ mod tests {
         let sleeps: Vec<_> = (0..=TURN_BUDGET)
             .map(|_| timer.sleep(Duration::from_secs(86_400)))
             .collect();
-        let after = sleeps.last().unwrap().key.unwrap().0;
+        let after = deadline(sleeps.last().unwrap());
         assert_eq!(driver.turn_at(after), TURN_BUDGET);
         assert_eq!(driver.len(), 1);
         assert_eq!(driver.turn_at(after), 1);
