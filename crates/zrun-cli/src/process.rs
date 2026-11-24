@@ -1,6 +1,6 @@
 use std::future::{Future, poll_fn};
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::pin::pin;
@@ -50,7 +50,7 @@ pub(crate) async fn execute(
     let timed_out = {
         let mut out_read = pin!(out.drain(&mut stdout, max_output));
         let mut err_read = pin!(err.drain(&mut stderr, max_output));
-        let mut exited = pin!(wait_until_exited(group.pid, io, timer));
+        let mut exited = pin!(zrun::process::wait_for_exit(group.child(), io, timer));
         let mut deadline = pin!(deadline);
         let mut leader_exited = false;
         let mut out_done = false;
@@ -83,7 +83,7 @@ pub(crate) async fn execute(
     };
     if timed_out {
         group.kill();
-        wait_until_exited(group.pid, io, timer).await?;
+        zrun::process::wait_for_exit(group.child(), io, timer).await?;
     }
     let status = group.reap()?;
     let truncated = out.truncated || err.truncated;
@@ -145,54 +145,6 @@ impl Capture {
     }
 }
 
-async fn wait_until_exited(pid: libc::pid_t, io: &Handle, timer: &Timer) -> io::Result<()> {
-    // SAFETY: pid identifies the unreaped child. Successful pidfd_open returns an owned fd.
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    if raw >= 0 {
-        // SAFETY: the successful syscall returned a new descriptor within the c_int range.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
-        let mut fd = AsyncFd::new(io, fd, Nonblocking::ReadinessOnly)?;
-        return fd.readable(|_| observe_exit(pid)).await;
-    }
-    // Older or restricted kernels can still observe exit without consuming status.
-    loop {
-        match observe_exit(pid) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                timer
-                    .sleep(Duration::from_millis(8))
-                    .await
-                    .map_err(io::Error::other)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            terminal => return terminal,
-        }
-    }
-}
-
-fn observe_exit(pid: libc::pid_t) -> io::Result<()> {
-    // SAFETY: siginfo_t is a plain C record; zero initialization also handles kernels
-    // that do not write the record when WNOHANG finds no waitable child.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: the pointer is valid and this operation only observes the owned child.
-    let code = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-        )
-    };
-    if code != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the signal record is initialized and si_pid is valid for waitid.
-    if unsafe { info.si_pid() } == pid {
-        Ok(())
-    } else {
-        Err(io::ErrorKind::WouldBlock.into())
-    }
-}
-
 struct ChildGroup {
     child: Option<Child>,
     pid: libc::pid_t,
@@ -205,6 +157,10 @@ impl ChildGroup {
             child: Some(child),
             pid,
         }
+    }
+
+    fn child(&self) -> &Child {
+        self.child.as_ref().expect("group has not been reaped")
     }
 
     fn kill(&self) {

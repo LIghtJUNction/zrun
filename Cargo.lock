@@ -520,6 +520,7 @@ dependencies = [
 name = "zrun"
 version = "0.1.0-p0.2"
 dependencies = [
+ "libc",
  "zrun-executor",
  "zrun-io",
  "zrun-sync",

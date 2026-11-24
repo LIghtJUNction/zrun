@@ -6,3 +6,5 @@ pub use zrun_time::{Sleep, Timer, TimerError};
 
 #[cfg(feature = "io")]
 pub use zrun_io as io;
+#[cfg(all(unix, feature = "process"))]
+pub mod process;

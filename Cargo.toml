@@ -16,6 +16,7 @@ default-members = [".", "crates/zrun-cli"]
 
 [features]
 io = ["dep:zrun-io", "zrun-executor/io"]
+process = ["io", "dep:libc"]
 
 [dependencies]
 zrun-executor = { path = "crates/zrun-executor" }
@@ -23,6 +24,9 @@ zrun-task = { path = "crates/zrun-task" }
 zrun-time = { path = "crates/zrun-time" }
 zrun-sync = { path = "crates/zrun-sync" }
 zrun-io = { path = "crates/zrun-io", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [profile.dev]
 debug = 0
