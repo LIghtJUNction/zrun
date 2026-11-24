@@ -531,6 +531,7 @@ dependencies = [
 name = "zrun-bench"
 version = "0.1.0-p0.2"
 dependencies = [
+ "libc",
  "serde_json",
  "tokio",
  "zrun",

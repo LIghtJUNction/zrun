@@ -69,13 +69,16 @@ Table 2. P0 ratio directions and targets inherited from the design.
 | --- | --- | --- | --- |
 | `spawn_join_ops_per_sec`, tasks/s | Higher | ≥ 1.20 | ≥ 2.00 |
 | `wake_ops_per_sec`, wakes/s | Higher | ≥ 1.20 | ≥ 2.00 |
-| `wake_p99_ns`, ns | Lower | ≤ 1.00 | ≤ 0.70 |
+| `yield_cpu_ns_per_wake`, CPU ns/wake | Lower | ≤ 0.85 | ≤ 0.50 |
+| `wake_p99_ns`, ns | Lower | < 1.00 | ≤ 0.70 |
 | `pending_bytes_per_task`, bytes/task | Lower | ≤ 0.85 | ≤ 0.60 |
 | `idle_rss_delta_bytes`, bytes | Lower | ≤ 0.80 | ≤ 0.50 |
 
+On Linux, `yield_process_cpu_ns` is the difference from `CLOCK_PROCESS_CPUTIME_ID` across the timed yield workload. It counts CPU consumed by the process's threads, including both user and kernel time. Division by the verified wake count gives CPU ns/wake. At one worker, it starts after submission. At multiple workers, it includes submission because workers can already be polling. Runtime creation, the post-run registry drain, and report output are outside the CPU interval. The timed code includes the common futures and join verification. This is a workload CPU cost, distinct from wall time and function-level attribution. Unsupported platforms return null.
+
 Each process's `wake_p99_ns` is computed from its retained raw latencies. The runner verifies that value and summarizes those process P99 values; the summary's P99 is **not** a pooled P99 over all tasks and rounds. Low latency-sample counts and short runs should remain visible in any interpretation.
 
-`missing_or_nonpositive_measurements`, `insufficient_independent_rounds`, `requires_release_build`, `not_requested` and `unsupported` never pass. Source/CI failures also remain separate from performance. The full project gate remains `not_evaluated` because this runner does not cover isolated scheduler CPU overhead or TCP. The report preserves their future thresholds, including CPU overhead ≤ 0.85/0.50, TCP throughput ≥ 0.95/1.20, and TCP P99 ≤ 1.10/0.80.
+`missing_or_nonpositive_measurements`, `insufficient_independent_rounds`, `requires_release_build`, `not_requested` and `unsupported` never pass. Source/CI failures also remain separate from performance. The full project gate remains `not_evaluated` because this runner does not cover TCP or full correctness and stability. The TCP runner reports throughput > 1.00 (challenge ≥ 1.20), and TCP P99 < 1.00 (challenge ≤ 0.80). The full result requires the same source candidate and Tokio baseline to satisfy every required metric and configuration, plus correctness and stability evidence. Equality does not pass a strict threshold.
 
 ## 4. Explicit, cancellable soak duration
 
@@ -134,7 +137,7 @@ Before publishing conclusions, review five points: the precise contribution bein
 
 吞吐以单向已校验的 payload 字节除以整批计时区间计算。RTT 从客户端发送起算，直到完整回显校验完成。每条连接按固定步长保留延迟样本，上限按连接数分配。报告同时保存 P50、P95、P99、原始延迟和两个进程的 CPU tick。客户端 CPU tick 对应计时阶段，服务端 CPU tick 包括建立连接和退出。
 
-每个配置运行至少 10 对独立样本，交替两侧顺序。以配对自举的 95% 区间判定吞吐是否达到 Tokio 的 95%，以及 P99 是否低于 Tokio 的 110%。查看 CPU 亲和性和客户端 CPU 使用量，判断负载生成器是否限制了吞吐。该比较覆盖回环 TCP，与外部网络、持续运行和其他平台的门禁分开。
+每个配置运行至少 10 对独立样本，交替两侧顺序。以配对自举的 95% 区间判定吞吐是否严格高于 Tokio，以及 P99 是否严格低于 Tokio。查看 CPU 亲和性和客户端 CPU 使用量，判断负载生成器是否限制了吞吐。该比较覆盖回环 TCP，与外部网络、持续运行和其他平台的门禁分开。
 
 ```sh
 cargo build --locked --release -p zrun-bench --bin zrun-tcp-bench

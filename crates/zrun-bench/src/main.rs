@@ -464,6 +464,27 @@ fn soak<E: Engine>(c: &Config, mut rt: E) -> Result<Value, String> {
     Ok(result)
 }
 
+#[cfg(target_os = "linux")]
+fn process_cpu_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: time is writable for a timespec. The process clock needs no
+    // external descriptor and the call does not retain the pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) } != 0 {
+        return None;
+    }
+    let seconds = u64::try_from(time.tv_sec).ok()?;
+    let nanos = u32::try_from(time.tv_nsec).ok()?;
+    (nanos < 1_000_000_000).then(|| Duration::new(seconds, nanos))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cpu_time() -> Option<Duration> {
+    None
+}
+
 fn run<E: Engine>(c: &Config) -> Result<Value, String> {
     // Read the same RSS source before and after runtime construction.
     let process_rss = rss();
@@ -490,6 +511,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
         }
         "yield" => {
             let ready_start = Instant::now();
+            let ready_cpu_start = (c.workers != 1).then(process_cpu_time).flatten();
             let mut handles = Vec::with_capacity(c.tasks);
             for index in 0..c.tasks {
                 handles.push(rt.spawn(YieldWork {
@@ -497,16 +519,21 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
                     index,
                 })?);
             }
-            let started = if c.workers == 1 {
-                Instant::now()
+            let (started, cpu_started) = if c.workers == 1 {
+                (Instant::now(), process_cpu_time())
             } else {
-                ready_start
+                (ready_start, ready_cpu_start)
             };
             checksum = rt.block_on(join_indices(handles))?;
             let ns = started.elapsed().as_nanos().max(1) as u64;
+            let cpu_ns = cpu_started
+                .and_then(|start| process_cpu_time()?.checked_sub(start))
+                .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
             let ops = c.tasks as u64 * c.yields as u64;
             metrics = json!({"elapsed_ns": ns, "wake_ops": ops,
-                "wake_ops_per_sec": ops as f64 * 1e9 / ns as f64, "yield_ns_per_op": ns as f64 / ops as f64});
+                "wake_ops_per_sec": ops as f64 * 1e9 / ns as f64, "yield_ns_per_op": ns as f64 / ops as f64,
+                "yield_process_cpu_ns": cpu_ns,
+                "yield_cpu_ns_per_wake": cpu_ns.map(|time| time as f64 / ops as f64)});
         }
         "wake_latency" => {
             let count = c.tasks.min(c.latency_samples);

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import operator
 import os
 from pathlib import Path
 import platform
@@ -28,6 +29,7 @@ WORKERS = (1, 2, 4, 8, 16)
 METRICS = {
     "spawn_join_ops_per_sec": ("spawn_join", "higher", 1.20, 2.00, "tasks/s"),
     "wake_ops_per_sec": ("yield", "higher", 1.20, 2.00, "wakes/s"),
+    "yield_cpu_ns_per_wake": ("yield", "lower", 0.85, 0.50, "CPU ns/wake"),
     "wake_p99_ns": ("wake_latency", "lower", 1.00, 0.70, "ns"),
     "pending_bytes_per_task": ("pending_memory", "lower", 0.85, 0.60, "bytes/task"),
     "idle_rss_delta_bytes": ("idle", "lower", 0.80, 0.50, "bytes"),
@@ -65,12 +67,19 @@ def describe(values, iterations=5000, seed=20261123):
             "median_bootstrap_95_ci": bootstrap_median(valid, iterations, seed)}
 
 
-def compare_pairs(pairs, *, direction, normal, challenge, expected, iterations, seed, release):
+def compare_pairs(pairs, *, direction, normal, challenge, expected, iterations, seed, release,
+                  strict_normal=False):
     """Pair by round; bootstrap the ratio of medians, never the median of ratios."""
     valid = [(float(z), float(t)) for z, t in pairs
              if finite_number(z) and finite_number(t) and z > 0 and t > 0]
+    normal_operator, compare_normal = {
+        ("higher", False): (">=", operator.ge),
+        ("higher", True): (">", operator.gt),
+        ("lower", False): ("<=", operator.le),
+        ("lower", True): ("<", operator.lt),
+    }[(direction, strict_normal)]
     result = {"ratio_definition": "median(zrun) / median(tokio)", "direction": direction,
-              "normal_threshold": normal, "challenge_threshold": challenge,
+              "normal_threshold": normal, "normal_operator": normal_operator, "challenge_threshold": challenge,
               "pairs": len(valid), "expected_pairs": expected, "ratio": None,
               "ratio_bootstrap_95_ci": None, "normal_pass": False, "challenge_pass": False}
     if valid:
@@ -83,7 +92,7 @@ def compare_pairs(pairs, *, direction, normal, challenge, expected, iterations, 
             ratios.append(statistics.median(a for a, _ in draw) / statistics.median(b for _, b in draw))
         ci = [quantile(ratios, 0.025), quantile(ratios, 0.975)]
         result.update(ratio=ratio, ratio_bootstrap_95_ci=ci)
-        result["normal_point_pass"] = ratio >= normal if direction == "higher" else ratio <= normal
+        result["normal_point_pass"] = compare_normal(ratio, normal)
         result["challenge_point_pass"] = ratio >= challenge if direction == "higher" else ratio <= challenge
     if len(valid) != expected or len(pairs) != expected:
         result["status"] = "missing_or_nonpositive_measurements"
@@ -94,7 +103,7 @@ def compare_pairs(pairs, *, direction, normal, challenge, expected, iterations, 
     else:
         result["status"] = "evaluated"
         edge = result["ratio_bootstrap_95_ci"][0 if direction == "higher" else 1]
-        result["normal_pass"] = edge >= normal if direction == "higher" else edge <= normal
+        result["normal_pass"] = compare_normal(edge, normal)
         result["challenge_pass"] = edge >= challenge if direction == "higher" else edge <= challenge
     return result
 
@@ -277,6 +286,16 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
         return "pending task accounting mismatch"
     if not isinstance(raw.get("metrics"), dict):
         return "missing metrics object"
+    if scenario == "yield":
+        metrics = raw["metrics"]
+        cpu = metrics.get("yield_process_cpu_ns")
+        per_wake = metrics.get("yield_cpu_ns_per_wake")
+        if (cpu is not None or per_wake is not None) and (
+            not finite_number(cpu) or cpu <= 0 or not finite_number(per_wake)
+            or metrics.get("wake_ops") != tasks * yields
+            or not math.isclose(per_wake, cpu / (tasks * yields), rel_tol=1e-12)
+        ):
+            return "invalid CPU measurement or wake count"
     if scenario == "wake_latency":
         values = raw.get("latency_samples_ns")
         if not isinstance(values, list) or len(values) != min(tasks, latency_samples) or not all(finite_number(v) and v >= 0 for v in values):
@@ -328,13 +347,12 @@ def summarize(records, args):
                               for i in range(args.rounds) for e in ("zrun", "tokio"))
                 row.update(compare_pairs(list(zip(values["zrun"], values["tokio"])), direction=direction,
                                          normal=normal, challenge=challenge, expected=args.rounds,
-                                         iterations=args.bootstrap, seed=seed, release=release))
+                                         iterations=args.bootstrap, seed=seed, release=release,
+                                         strict_normal=normal == 1.0))
                 cells.append(row)
     return {"metrics": cells, "full_project_gate": "not_evaluated",
-            "unsupported": [{"metric": "scheduler_cpu_overhead", "reason": "yield_ns_per_op is wall time including harness, not isolated CPU overhead",
-                             "normal_ratio_max": 0.85, "challenge_ratio_max": 0.50},
-                            {"metric": "tcp_throughput", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_min": 0.95, "challenge_ratio_min": 1.20},
-                            {"metric": "tcp_p99", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_max": 1.10, "challenge_ratio_max": 0.80}],
+            "unsupported": [{"metric": "tcp_throughput", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_min": 1.00, "normal_operator": ">", "challenge_ratio_min": 1.20},
+                            {"metric": "tcp_p99", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_max": 1.00, "normal_operator": "<", "challenge_ratio_max": 0.80}],
             "latency_note": "Per-process wake_p99_ns is summarized across independent processes; not a pooled latency P99.",
             "decision_rule": "At least 10 complete positive pairs, release binary, and entire paired-bootstrap 95% CI beyond threshold. No multiplicity correction; exploratory per-cell decisions."}
 
@@ -355,6 +373,14 @@ def self_test():
                                        expected=10, iterations=100, seed=4, release=True)
                 self.assertTrue(result["normal_pass"])
                 self.assertEqual(result["ratio_bootstrap_95_ci"], [pairs[0][0], pairs[0][0]])
+        def test_strict_superiority_rejects_equal_ratios(self):
+            for direction, winning in (("higher", 1.01), ("lower", 0.99)):
+                for ratio, should_pass in ((1.0, False), (winning, True)):
+                    result = compare_pairs([(ratio, 1.0)] * 10, direction=direction,
+                                           normal=1.0, challenge=1.0, expected=10,
+                                           iterations=100, seed=7, release=True, strict_normal=True)
+                    self.assertEqual(result["normal_point_pass"], should_pass)
+                    self.assertEqual(result["normal_pass"], should_pass)
         def test_incomplete_and_zero_never_pass(self):
             for pairs, n, release in [([(2, 1)] * 9, 10, True), ([(2, 1)] * 2, 2, True),
                                       ([(2, 0)] * 10, 10, True), ([(0, 1)] * 10, 10, True),

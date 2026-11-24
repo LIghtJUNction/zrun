@@ -151,8 +151,8 @@ def summarize(args, samples):
     rows = []
     opponent = "baseline" if args.baseline else "tokio"
     config = (
-        ("tcp_bytes_per_second", "higher", 0.95, 1.20),
-        ("tcp_rtt_p99_ns", "lower", 1.10, 0.80),
+        ("tcp_bytes_per_second", "higher", 1.00, 1.20),
+        ("tcp_rtt_p99_ns", "lower", 1.00, 0.80),
     )
     for workers in args.workers:
         for case in args.case:
@@ -167,6 +167,7 @@ def summarize(args, samples):
                 result = bench.compare_pairs(list(zip(values["zrun"], values[opponent])),
                                              direction=direction, normal=normal, challenge=challenge,
                                              expected=args.rounds, iterations=args.bootstrap, seed=seed,
+                                             strict_normal=True,
                                              release=all(s["profile"] == "release" for s in found.values()))
                 result["ratio_definition"] = f"median(zrun) / median({opponent})"
                 rows.append({
