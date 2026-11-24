@@ -502,6 +502,17 @@ async fn remote_records(
     Ok(records)
 }
 
+pub(crate) fn prepare_one(cwd: &std::path::Path, mut request: Request) -> io::Result<Vec<u8>> {
+    request.cwd = Some(
+        request
+            .cwd
+            .as_deref()
+            .map_or_else(|| cwd.to_path_buf(), |dir| cwd.join(dir)),
+    );
+    let (payload, _) = encode_remote_batch(0, &[request])?;
+    Ok(payload)
+}
+
 #[derive(Default)]
 pub(crate) struct RemotePool {
     idle: std::sync::Mutex<Vec<http::IdleStream>>,
@@ -512,11 +523,10 @@ impl RemotePool {
         &self,
         io: &zrun::io::Handle,
         path: &std::path::Path,
-        request: Request,
+        payload: &[u8],
         timer: &zrun::Timer,
     ) -> io::Result<Delivery> {
-        let payload = remote_payload(0, &[request])?;
-        let mut records = self.exchange(io, path, timer, &payload, 0, 1).await?;
+        let mut records = self.exchange(io, path, timer, payload, 0, 1).await?;
         Ok(records.remove(0))
     }
 

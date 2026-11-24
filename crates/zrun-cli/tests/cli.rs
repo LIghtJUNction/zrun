@@ -776,6 +776,32 @@ fn native_script_reuses_an_explicit_key_and_validates_before_running() {
 }
 
 #[test]
+fn native_remote_script_preflights_wire_sizes_before_submitting() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let path = directory.0.join("oversize.zrun");
+    fs::write(
+        &path,
+        format!(
+            "# zrun:1\nshell -- touch executed\nshell {}\n",
+            json!({"script":"\u{1}".repeat(65_536)})
+        ),
+    )
+    .unwrap();
+    let output = zrun()
+        .current_dir(&directory.0)
+        .env("ZRUN_SOCKET", &socket)
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("encoded request exceeds"));
+    assert!(!directory.0.join("executed").exists());
+}
+
+#[test]
 fn native_scripts_share_the_unix_broker_across_processes() {
     let directory = Directory::new();
     let sock = directory.0.join("zrun.sock");

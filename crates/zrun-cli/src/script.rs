@@ -9,11 +9,16 @@ use crate::execution::{Batch, Delivery, Request, Ticket};
 
 pub(crate) const HEADER: &str = "# zrun:1";
 
-enum Step {
-    Spawn(String, Request),
+enum Step<R = Request> {
+    Spawn(String, R),
     Await(String),
     DrainReady,
-    Shell(Request),
+    Shell(R),
+}
+
+enum RemoteRequest {
+    Encoded(Vec<u8>),
+    Deferred(Request),
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -183,27 +188,47 @@ pub(crate) fn run(shell: PathBuf, source: &str, args: Vec<String>) -> io::Result
         let path = std::sync::Arc::new(PathBuf::from(path));
         let pool = Arc::new(crate::mcp::RemotePool::default());
         let cwd = std::env::current_dir()?;
+        let mut retained = 0;
+        let mut prepare = |request: Request| -> io::Result<RemoteRequest> {
+            let payload = crate::mcp::prepare_one(&cwd, request.clone())?;
+            if payload.capacity() <= Batch::MAX_INPUT - retained {
+                retained += payload.capacity();
+                Ok(RemoteRequest::Encoded(payload))
+            } else {
+                Ok(RemoteRequest::Deferred(request))
+            }
+        };
+        let steps = steps
+            .into_iter()
+            .map(|step| {
+                Ok(match step {
+                    Step::Spawn(name, request) => Step::Spawn(name, prepare(request)?),
+                    Step::Await(name) => Step::Await(name),
+                    Step::DrainReady => Step::DrainReady,
+                    Step::Shell(request) => Step::Shell(prepare(request)?),
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let cwd = Arc::new(cwd);
         let mut runtime = crate::executor::Executor::current()?;
         let spawner = runtime.spawner();
         let io = runtime.io().clone();
         let timer = runtime.timer();
-        runtime.block_on(execute(steps, async |requests: Vec<Request>| {
+        runtime.block_on(execute(steps, async |requests: Vec<RemoteRequest>| {
             requests
                 .into_iter()
-                .map(|mut request| {
-                    request.cwd = Some(
-                        request
-                            .cwd
-                            .as_deref()
-                            .map_or_else(|| cwd.clone(), |dir| cwd.join(dir)),
-                    );
+                .map(|request| {
+                    let payload = match request {
+                        RemoteRequest::Encoded(payload) => payload,
+                        RemoteRequest::Deferred(request) => crate::mcp::prepare_one(&cwd, request)?,
+                    };
                     let (sender, receiver) = zrun::sync::channel();
                     let (io, path, timer) = (io.clone(), path.clone(), timer.clone());
                     let pool = Arc::clone(&pool);
                     spawner
                         .spawn(async move {
                             let delivery = pool
-                                .run_one(&io, &path, request, &timer)
+                                .run_one(&io, &path, &payload, &timer)
                                 .await
                                 .unwrap_or_else(Delivery::rejected);
                             let _ = sender.send(delivery);
@@ -229,9 +254,9 @@ async fn await_ticket(ticket: io::Result<Ticket>) -> Delivery {
     }
 }
 
-async fn execute(
-    steps: Vec<Step>,
-    mut submit: impl AsyncFnMut(Vec<Request>) -> Vec<io::Result<Ticket>>,
+async fn execute<R>(
+    steps: Vec<Step<R>>,
+    mut submit: impl AsyncFnMut(Vec<R>) -> Vec<io::Result<Ticket>>,
 ) -> io::Result<u8> {
     let mut pending = std::collections::BTreeMap::new();
     let mut status = 0;
