@@ -710,124 +710,172 @@ impl Drop for SocketPath {
     }
 }
 
-pub(super) async fn post(
-    io: &zrun::io::Handle,
-    path: &Path,
-    message: &[u8],
-    timer: &Timer,
-) -> io::Result<Option<Vec<u8>>> {
-    if message.len() > MAX_MESSAGE {
-        return Err(invalid("client MCP message exceeds the size limit"));
+pub(super) struct UnixClient<'a> {
+    io: &'a zrun::io::Handle,
+    path: &'a Path,
+    timer: &'a Timer,
+    reuse: bool,
+    saved: Option<(Stream, Instant)>,
+}
+
+impl<'a> UnixClient<'a> {
+    pub(super) fn new(
+        io: &'a zrun::io::Handle,
+        path: &'a Path,
+        timer: &'a Timer,
+        reuse: bool,
+    ) -> Self {
+        Self {
+            io,
+            path,
+            timer,
+            reuse,
+            saved: None,
+        }
     }
-    validate_directory(path)?;
-    // Connection and upload share one transport budget. Waiting for the
-    // command result below has a separate allowance.
-    let upload_expires = Instant::now() + CLIENT_IO_TIMEOUT;
-    let mut stream = deadline_at(io.connect_unix(path), timer, upload_expires).await??;
-    let header = format!(
-        "POST /mcp HTTP/1.1\r\nHost: zrun\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n",
-        message.len()
-    );
-    deadline_at(
-        async {
-            stream.write_all(header.as_bytes()).await?;
-            stream.write_all(message).await
-        },
-        timer,
-        upload_expires,
-    )
-    .await??;
-    let mut response_frame = Frame::new(None);
-    let first_body = match deadline(
-        read_headers(&mut stream, &mut response_frame),
-        timer,
-        Duration::from_secs(7_200),
-    )
-    .await?
-    {
-        Ok(start) => start,
-        Err(ReadError::Io(error)) => return Err(error),
-        Err(ReadError::Http(_)) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid MCP response headers",
-            ));
+
+    pub(super) async fn post(&mut self, message: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        if message.len() > MAX_MESSAGE {
+            return Err(invalid("client MCP message exceeds the size limit"));
         }
-    };
-    let mut bytes = std::mem::take(&mut response_frame.bytes);
-    let length = {
-        let mut headers = [httparse::EMPTY_HEADER; 32];
-        let mut response = httparse::Response::new(&mut headers);
-        if !matches!(
-            response.parse(&bytes[..first_body]),
-            Ok(httparse::Status::Complete(_))
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid MCP response",
-            ));
-        }
-        if response.code == Some(202) {
-            return Ok(None);
-        }
-        if response.code != Some(200) {
-            return Err(io::Error::other(format!(
-                "MCP returned HTTP {}",
-                response.code.unwrap_or(0)
-            )));
-        }
-        let mut lengths = response
-            .headers
-            .iter()
-            .filter(|header| header.name.eq_ignore_ascii_case("Content-Length"));
-        let length = lengths
-            .next()
-            .and_then(|header| std::str::from_utf8(header.value).ok())
-            .and_then(|text| text.parse::<usize>().ok())
-            .filter(|length| *length <= 16 * 1024 * 1024)
-            .ok_or_else(|| {
-                io::Error::new(
+        // An interrupted or failed exchange drops its connection. Commands
+        // could have run before a disconnect, so never resend automatically.
+        let started = Instant::now();
+        let upload_expires = started + CLIENT_IO_TIMEOUT;
+        let mut stream = match self.saved.take() {
+            Some((stream, expires)) if started < expires => stream,
+            _ => {
+                validate_directory(self.path)?;
+                deadline_at(self.io.connect_unix(self.path), self.timer, upload_expires).await??
+            }
+        };
+        let connection = if self.reuse { "keep-alive" } else { "close" };
+        let timer = self.timer;
+        let header = format!(
+            "POST /mcp HTTP/1.1\r\nHost: zrun\r\nConnection: {connection}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            message.len()
+        );
+        deadline_at(
+            async {
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(message).await
+            },
+            timer,
+            upload_expires,
+        )
+        .await??;
+        let mut response_frame = Frame::new(None);
+        let first_body = match deadline(
+            read_headers(&mut stream, &mut response_frame),
+            timer,
+            Duration::from_secs(7_200),
+        )
+        .await?
+        {
+            Ok(start) => start,
+            Err(ReadError::Io(error)) => return Err(error),
+            Err(ReadError::Http(_)) => {
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "invalid or oversized MCP response body",
-                )
-            })?;
-        if lengths.next().is_some()
-            || response
+                    "invalid MCP response headers",
+                ));
+            }
+        };
+        let mut bytes = std::mem::take(&mut response_frame.bytes);
+        let (length, keep_alive, accepted) = {
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut response = httparse::Response::new(&mut headers);
+            if !matches!(
+                response.parse(&bytes[..first_body]),
+                Ok(httparse::Status::Complete(_))
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid MCP response",
+                ));
+            }
+            let mut connections = response
                 .headers
                 .iter()
-                .any(|header| header.name.eq_ignore_ascii_case("Transfer-Encoding"))
-        {
+                .filter(|header| header.name.eq_ignore_ascii_case("Connection"));
+            let keep_alive = self.reuse
+                && response.version == Some(1)
+                && connections
+                    .next()
+                    .is_some_and(|header| header.value.eq_ignore_ascii_case(b"keep-alive"))
+                && connections.next().is_none();
+            let accepted = response.code == Some(202);
+            if accepted && !keep_alive {
+                return Ok(None);
+            }
+            if !accepted && response.code != Some(200) {
+                return Err(io::Error::other(format!(
+                    "MCP returned HTTP {}",
+                    response.code.unwrap_or(0)
+                )));
+            }
+            let mut lengths = response
+                .headers
+                .iter()
+                .filter(|header| header.name.eq_ignore_ascii_case("Content-Length"));
+            let length = lengths
+                .next()
+                .and_then(|header| std::str::from_utf8(header.value).ok())
+                .and_then(|text| text.parse::<usize>().ok())
+                .filter(|length| *length <= 16 * 1024 * 1024)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid or oversized MCP response body",
+                    )
+                })?;
+            if lengths.next().is_some()
+                || response
+                    .headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("Transfer-Encoding"))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ambiguous MCP response framing",
+                ));
+            }
+            if accepted && length != 0 {
+                return Err(invalid("MCP accepted response must have no body"));
+            }
+            (length, keep_alive, accepted)
+        };
+        let mut filled = bytes.len();
+        let total = first_body + length;
+        if filled > total {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "ambiguous MCP response framing",
+                "extra data after MCP response",
             ));
         }
-        length
-    };
-    let mut filled = bytes.len();
-    let total = first_body + length;
-    if filled > total {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "extra data after MCP response",
-        ));
-    }
-    bytes.resize(total, 0);
-    deadline(
-        async {
-            while filled < total {
-                let count = stream.read(&mut bytes[filled..]).await?;
-                if count == 0 {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
+        bytes.resize(total, 0);
+        deadline(
+            async {
+                while filled < total {
+                    let count = stream.read(&mut bytes[filled..]).await?;
+                    if count == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    filled += count;
                 }
-                filled += count;
-            }
-            Ok(Some(bytes.split_off(first_body)))
-        },
-        timer,
-        CLIENT_IO_TIMEOUT,
-    )
-    .await?
+                Ok::<(), io::Error>(())
+            },
+            timer,
+            CLIENT_IO_TIMEOUT,
+        )
+        .await??;
+        if keep_alive {
+            // Bound reuse conservatively from before the exchange, so an idle
+            // session does not normally outlive the server's read deadline.
+            self.saved = Some((stream, started + Duration::from_secs(10)));
+        }
+        Ok((!accepted).then(|| bytes.split_off(first_body)))
+    }
 }
 
 #[cfg(test)]

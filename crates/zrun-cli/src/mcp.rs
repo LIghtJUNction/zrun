@@ -99,6 +99,9 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
     };
     let timer = runtime.timer();
     let io = runtime.io().clone();
+    let mut client = socket
+        .as_deref()
+        .map(|path| http::UnixClient::new(&io, path, &timer, true));
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut line = Vec::new();
@@ -116,8 +119,8 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
                 "MCP stdio frame exceeds the limit or is incomplete",
             ));
         }
-        if let Some(path) = &socket {
-            let Some(message) = runtime.block_on(http::post(&io, path, &line, &timer))?? else {
+        if let Some(client) = &mut client {
+            let Some(message) = runtime.block_on(client.post(&line))?? else {
                 continue;
             };
             output.write_all(&message)?;
@@ -343,6 +346,7 @@ pub(crate) fn run_remote(
     let mut runtime = Executor::current()?;
     let io = runtime.io().clone();
     let timer = runtime.timer();
+    let mut client = http::UnixClient::new(&io, &path, &timer, true);
     runtime.block_on(async {
         let mut offset = 0;
         while offset < requests.len() {
@@ -360,7 +364,7 @@ pub(crate) fn run_remote(
                 }
                 count /= 2;
             };
-            let records = remote_records(&io, &path, &payload, &timer, offset, count).await?;
+            let records = remote_records(&mut client, &payload, offset, count).await?;
             for (index, delivery) in records.into_iter().enumerate() {
                 record(offset + index, delivery)?;
             }
@@ -420,14 +424,13 @@ struct RemoteDeliveries {
 }
 
 async fn remote_records(
-    io: &zrun::io::Handle,
-    path: &std::path::Path,
+    client: &mut http::UnixClient<'_>,
     payload: &[u8],
-    timer: &zrun::Timer,
     id: usize,
     count: usize,
 ) -> io::Result<Vec<Delivery>> {
-    let body = http::post(io, path, payload, timer)
+    let body = client
+        .post(payload)
         .await?
         .ok_or_else(|| io::Error::other("missing command response"))?;
     let response: RemoteReply = serde_json::from_slice(&body)?;
@@ -457,6 +460,7 @@ pub(crate) async fn remote_one(
     timer: &zrun::Timer,
 ) -> io::Result<Delivery> {
     let payload = remote_payload(0, &[request])?;
-    let mut records = remote_records(io, path, &payload, timer, 0, 1).await?;
+    let mut client = http::UnixClient::new(io, path, timer, false);
+    let mut records = remote_records(&mut client, &payload, 0, 1).await?;
     Ok(records.remove(0))
 }
