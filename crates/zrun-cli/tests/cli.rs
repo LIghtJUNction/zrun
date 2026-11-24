@@ -487,6 +487,29 @@ await second first
 }
 
 #[test]
+fn native_inline_commands_preserve_shell_syntax_and_arguments() {
+    let dir = Directory::new();
+    let path = dir.0.join("inline.zrun");
+    fs::write(
+        &path,
+        r#"# zrun:1
+async prepare -- printf '%s' "$(printf '%s' "$1")" | tr '[:lower:]' '[:upper:]' > result
+await prepare
+shell -- cat result; printf '|%s' --flag
+"#,
+    )
+    .unwrap();
+    let output = zrun()
+        .current_dir(&dir.0)
+        .arg(path)
+        .arg("two words")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"TWO WORDS|--flag");
+}
+
+#[test]
 fn native_script_reuses_an_explicit_key_and_validates_before_running() {
     let dir = Directory::new();
     let path = dir.0.join("cache.zrun");

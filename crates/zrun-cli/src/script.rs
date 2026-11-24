@@ -46,7 +46,7 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
     let mut steps = Vec::new();
     while let Some((index, text)) = lines.next() {
         let fail = |reason: &str| invalid(format!("line {}: {reason}", index + 1));
-        let line = text.trim();
+        let line = text.trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -58,7 +58,7 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
             .ok_or_else(|| fail("expected async, await or shell with arguments"))?;
         let rest = rest.trim_start();
         match operation {
-            "await" if rest == "*" => {
+            "await" if rest.trim_end() == "*" => {
                 if steps.len() + pending.len() > 8192 {
                     return Err(fail("too many script steps"));
                 }
@@ -96,6 +96,7 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
                     (None, rest)
                 };
                 let mut request = if let Some(tag) = payload.strip_prefix("<<") {
+                    let tag = tag.trim_end();
                     if tag.is_empty()
                         || !tag.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                     {
@@ -113,6 +114,14 @@ fn parse_with_args(source: &str, args: Arc<Vec<String>>) -> io::Result<Vec<Step>
                         script.push('\n');
                     }
                     Request::new(script)
+                } else if let Some(command) = payload.strip_prefix("--").filter(|command| {
+                    command.is_empty() || command.starts_with(char::is_whitespace)
+                }) {
+                    let command = command.trim_start();
+                    if command.is_empty() {
+                        return Err(fail("missing shell command after --"));
+                    }
+                    Request::new(command.into())
                 } else {
                     serde_json::from_str::<Request>(payload)
                         .map_err(|error| fail(&error.to_string()))?
