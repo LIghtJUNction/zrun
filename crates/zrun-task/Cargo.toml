@@ -1,6 +1,6 @@
 [package]
 name = "zrun-task"
-version = "0.1.0-p0.10"
+version = "0.1.0-p0.11"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
