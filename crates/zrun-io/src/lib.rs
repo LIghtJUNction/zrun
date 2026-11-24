@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::net::{Shutdown, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -355,6 +355,28 @@ impl Stream {
         }
         Ok(())
     }
+
+    /// Write the supplied slices in order, waiting for socket readiness as needed.
+    ///
+    /// The slice descriptors are advanced as bytes are written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS or reactor shutdown error. A prefix may have been written.
+    pub async fn write_all_vectored(&mut self, mut buf: &mut [IoSlice<'_>]) -> io::Result<()> {
+        IoSlice::advance_slices(&mut buf, 0);
+        while !buf.is_empty() {
+            let written = self
+                .0
+                .ready(Direction::Write, |socket| socket.write_vectored(buf))
+                .await?;
+            if written == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            IoSlice::advance_slices(&mut buf, written);
+        }
+        Ok(())
+    }
 }
 
 enum Socket {
@@ -438,6 +460,14 @@ impl Write for Socket {
             Self::Tcp(socket) => socket.write(buf),
             #[cfg(unix)]
             Self::Unix(socket) => socket.write(buf),
+        }
+    }
+
+    fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(socket) => socket.write_vectored(buffers),
+            #[cfg(unix)]
+            Self::Unix(socket) => socket.write_vectored(buffers),
         }
     }
 

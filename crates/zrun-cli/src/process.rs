@@ -98,6 +98,7 @@ pub(crate) async fn execute(
         stderr: err.bytes,
         truncated: out.truncated || err.truncated,
         error: timed_out.then(|| "command timed out".into()),
+        encoded: Default::default(),
     })
 }
 

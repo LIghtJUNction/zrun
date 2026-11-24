@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::time::Duration;
 use zrun::Timer;
 use zrun::io::{Listener, Stream, UnixListener};
 
+use super::reply::Reply;
 use super::{MAX_MESSAGE, deadline, respond, supports_protocol};
 use crate::execution::Broker;
 use crate::executor::{Executor, Spawner};
@@ -257,13 +258,22 @@ async fn handle(
     let request = deadline(read_request(stream, access), timer, CLIENT_IO_TIMEOUT).await??;
     let rejected = matches!(&request, Request::Reply(_));
     let (status, body) = match request {
-        Request::Reply(status) => (status, Vec::new()),
-        Request::Post(request) => match respond(broker, &request).await {
-            Some(response) => (Status::Ok, serde_json::to_vec(&response)?),
-            None => (Status::Accepted, Vec::new()),
-        },
+        Request::Reply(status) => (status, None),
+        Request::Post(request) => {
+            let message = serde_json::from_slice(&request);
+            drop(request);
+            match respond(broker, message).await? {
+                Some(reply) => (Status::Ok, Some(reply)),
+                None => (Status::Accepted, None),
+            }
+        }
     };
-    deadline(write_reply(stream, status, &body), timer, CLIENT_IO_TIMEOUT).await??;
+    deadline(
+        write_reply(stream, status, body.as_ref()),
+        timer,
+        CLIENT_IO_TIMEOUT,
+    )
+    .await??;
     if rejected {
         // Send FIN first. Closing a socket with unread request bytes could send
         // RST and hide an authentication or framing response from the caller.
@@ -502,15 +512,21 @@ fn same_secret(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-async fn write_reply(stream: &mut Stream, status: Status, body: &[u8]) -> io::Result<()> {
+async fn write_reply(stream: &mut Stream, status: Status, body: Option<&Reply>) -> io::Result<()> {
     let header = format!(
         "HTTP/1.1 {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n",
         status.line(),
-        body.len(),
+        body.map_or(0, Reply::len),
         status.extra(),
     );
-    stream.write_all(header.as_bytes()).await?;
-    stream.write_all(body).await
+    let Some(reply) = body else {
+        return stream.write_all(header.as_bytes()).await;
+    };
+    let mut chunks = std::iter::once(header.as_bytes())
+        .chain(reply.chunks())
+        .map(IoSlice::new)
+        .collect::<Vec<_>>();
+    stream.write_all_vectored(&mut chunks).await
 }
 
 fn invalid(message: &'static str) -> io::Error {

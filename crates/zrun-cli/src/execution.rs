@@ -3,7 +3,7 @@ use std::future::{Future, poll_fn};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -106,6 +106,24 @@ pub(crate) struct ResultRecord {
     pub stderr: Vec<u8>,
     pub truncated: bool,
     pub error: Option<String>,
+    #[serde(skip)]
+    pub(crate) encoded: Mutex<Weak<EncodedResult>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EncodedResult {
+    json: Box<[u8]>,
+    json_string: Box<[u8]>,
+}
+
+impl EncodedResult {
+    pub(crate) fn json(&self) -> &[u8] {
+        &self.json
+    }
+
+    pub(crate) fn json_string_contents(&self) -> &[u8] {
+        &self.json_string[1..self.json_string.len() - 1]
+    }
 }
 
 impl ResultRecord {
@@ -116,7 +134,25 @@ impl ResultRecord {
             stderr: Vec::new(),
             truncated: false,
             error: Some(error.to_string()),
+            encoded: Mutex::default(),
         }
+    }
+
+    pub(crate) fn encode(&self) -> serde_json::Result<Arc<EncodedResult>> {
+        let mut previous = self.encoded.lock().expect("result encoding poisoned");
+        if let Some(encoded) = previous.upgrade() {
+            return Ok(encoded);
+        }
+        let json = serde_json::to_string(self)?;
+        let json_string = serde_json::to_vec(&json)?;
+        let encoded = Arc::new(EncodedResult {
+            json: json.into_bytes().into_boxed_slice(),
+            json_string: json_string.into_boxed_slice(),
+        });
+        // Idle cached records retain only raw output. Concurrent sends share
+        // the encoded bytes while any of them still needs the representation.
+        *previous = Arc::downgrade(&encoded);
+        Ok(encoded)
     }
 }
 

@@ -411,3 +411,43 @@ fn default_socket_refuses_a_shared_runtime_directory() {
     assert!(!output.status.success());
     assert!(!directory.0.join("zrun").exists());
 }
+
+#[test]
+fn mcp_batch_preserves_order_binary_output_and_escaped_content() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let mut request = rpc(
+        7,
+        "tools/call",
+        json!({"name": "shell_batch", "arguments": {"commands": [
+            {"script": "sleep 0.01; printf '%s\\n' 'a\"b'"},
+            {"script": "printf '\\377' >&2; exit 7"}
+        ]}}),
+    );
+    let id = "escaped-\"-测试";
+    request["id"] = json!(id);
+    let connection = UnixStream::connect(&socket).expect("connect to zrun daemon");
+    connection
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set fixture deadline");
+    let (status, reply) = post(connection, "zrun", "", &request);
+    assert_eq!(status, 200);
+    assert_eq!(reply["id"], id);
+    let reply = &reply["result"];
+    assert_eq!(reply["isError"], true);
+    let text: Value = serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, reply["structuredContent"]);
+    let commands = text["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(
+        commands[0]["result"]["stdout"],
+        json!({"encoding": "utf8", "data": "a\"b\n"})
+    );
+    assert_eq!(
+        commands[1]["result"]["stderr"],
+        json!({"encoding": "base64", "data": "/w=="})
+    );
+    assert_eq!(commands[1]["result"]["exit_code"], 7);
+}

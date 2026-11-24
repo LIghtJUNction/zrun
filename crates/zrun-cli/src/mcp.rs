@@ -4,12 +4,16 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::task::Poll;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::execution::{Broker, Delivery, Request};
 use crate::executor::Executor;
 
 mod http;
+mod reply;
+
+use self::reply::Reply;
 
 pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
 const MAX_BATCH_COMMANDS: usize = 16;
@@ -113,22 +117,25 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
                 "MCP stdio frame exceeds the limit or is incomplete",
             ));
         }
-        let response = if let Some(path) = &socket {
-            runtime.block_on(http::post(&io, path, &line, &timer))??
-        } else {
-            runtime
-                .block_on(respond(
-                    broker.as_ref().expect("local stdio has a broker"),
-                    &line,
-                ))?
-                .map(|value| serde_json::to_vec(&value))
-                .transpose()?
-        };
-        if let Some(message) = response {
+        if let Some(path) = &socket {
+            let Some(message) = runtime.block_on(http::post(&io, path, &line, &timer))?? else {
+                continue;
+            };
             output.write_all(&message)?;
-            writeln!(output)?;
-            output.flush()?;
+        } else {
+            let Some(response) = runtime.block_on(respond(
+                broker.as_ref().expect("local stdio has a broker"),
+                serde_json::from_slice(&line),
+            ))??
+            else {
+                continue;
+            };
+            for chunk in response.chunks() {
+                output.write_all(chunk)?;
+            }
         }
+        writeln!(output)?;
+        output.flush()?;
     }
 }
 
@@ -136,20 +143,25 @@ pub(crate) fn supports_protocol(version: &str) -> bool {
     LEGACY_VERSIONS.contains(&version)
 }
 
-pub(crate) async fn respond(broker: &Broker, input: &[u8]) -> Option<Value> {
-    let message = match serde_json::from_slice::<Value>(input) {
+async fn respond(
+    broker: &Broker,
+    message: serde_json::Result<Value>,
+) -> serde_json::Result<Option<Reply>> {
+    let message = match message {
         Ok(message) => message,
-        Err(_) => return Some(rpc_error(Value::Null, -32700, "parse error")),
+        Err(_) => return rpc_error(Value::Null, -32700, "parse error"),
     };
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return Some(rpc_error(Value::Null, -32600, "invalid request"));
+        return rpc_error(Value::Null, -32600, "invalid request");
     };
     if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Some(rpc_error(Value::Null, -32600, "invalid JSON-RPC version"));
+        return rpc_error(Value::Null, -32600, "invalid JSON-RPC version");
     }
-    let id = message.get("id")?;
+    let Some(id) = message.get("id") else {
+        return Ok(None);
+    };
     if !id.is_string() && !id.is_number() {
-        return Some(rpc_error(Value::Null, -32600, "invalid request id"));
+        return rpc_error(Value::Null, -32600, "invalid request id");
     }
     let params = message.get("params").unwrap_or(&Value::Null);
     let result = match method {
@@ -166,17 +178,24 @@ pub(crate) async fn respond(broker: &Broker, input: &[u8]) -> Option<Value> {
         }
         "ping" => json!({}),
         "tools/list" => tools(),
-        "tools/call" => match call(broker, params).await {
-            Ok(result) => result,
-            Err(message) => return Some(rpc_error(id.clone(), -32602, &message)),
-        },
-        _ => return Some(rpc_error(id.clone(), -32601, "method not found")),
+        "tools/call" => {
+            let (batch, commands) = match parse_call(params) {
+                Ok(call) => call,
+                Err(error) => return rpc_error(id.clone(), -32602, &error),
+            };
+            let id = id.clone();
+            drop(message);
+            let records = execute_call(broker, commands).await;
+            return Reply::tool(&id, &records, batch).map(Some);
+        }
+        _ => return rpc_error(id.clone(), -32601, "method not found"),
     };
-    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    Reply::json(&json!({"jsonrpc": "2.0", "id": id, "result": result})).map(Some)
 }
 
-fn rpc_error(id: Value, code: i32, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+fn rpc_error(id: Value, code: i32, message: &str) -> serde_json::Result<Option<Reply>> {
+    Reply::json(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
+        .map(Some)
 }
 
 fn request_schema() -> Value {
@@ -228,17 +247,13 @@ struct CommandBatch {
     commands: Vec<Request>,
 }
 
-async fn call(broker: &Broker, params: &Value) -> Result<Value, String> {
+fn parse_call(params: &Value) -> Result<(bool, Vec<Request>), String> {
     let args = params.get("arguments").ok_or("missing tool arguments")?;
     let batch = match params.get("name").and_then(Value::as_str) {
         Some("shell_run") => CommandBatch {
-            commands: vec![
-                serde_json::from_value(args.clone()).map_err(|error| error.to_string())?,
-            ],
+            commands: vec![Deserialize::deserialize(args).map_err(|error| error.to_string())?],
         },
-        Some("shell_batch") => {
-            serde_json::from_value(args.clone()).map_err(|error| error.to_string())?
-        }
+        Some("shell_batch") => Deserialize::deserialize(args).map_err(|error| error.to_string())?,
         _ => return Err("unknown tool".into()),
     };
     if batch.commands.is_empty() || batch.commands.len() > MAX_BATCH_COMMANDS {
@@ -247,38 +262,23 @@ async fn call(broker: &Broker, params: &Value) -> Result<Value, String> {
     for command in &batch.commands {
         command.validate().map_err(|error| error.to_string())?;
     }
-    let many = params["name"] == "shell_batch";
-    let mut tickets = Vec::with_capacity(batch.commands.len());
-    for command in batch.commands {
+    Ok((params["name"] == "shell_batch", batch.commands))
+}
+
+async fn execute_call(broker: &Broker, commands: Vec<Request>) -> Vec<Delivery> {
+    let mut tickets = Vec::with_capacity(commands.len());
+    for command in commands {
         tickets.push(broker.submit(command).await);
     }
     let mut records = Vec::with_capacity(tickets.len());
-    let mut failed = false;
     for ticket in tickets {
-        match ticket {
-            Ok(ticket) => match ticket.await {
-                Ok(delivery) => {
-                    failed |= delivery.result.exit_code != 0;
-                    records.push(json!(delivery));
-                }
-                Err(error) => {
-                    failed = true;
-                    records.push(json!(Delivery::rejected(io::Error::other(error))));
-                }
-            },
-            Err(error) => {
-                failed = true;
-                records.push(json!(Delivery::rejected(io::Error::other(error))));
-            }
-        }
+        let delivery = match ticket {
+            Ok(ticket) => ticket.await.map_err(io::Error::other),
+            Err(error) => Err(error),
+        };
+        records.push(delivery.unwrap_or_else(Delivery::rejected));
     }
-    let value = if many {
-        json!({"commands": records})
-    } else {
-        records.pop().expect("one command")
-    };
-    let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-    Ok(json!({"content":[{"type":"text","text":text}],"structuredContent":value,"isError":failed}))
+    records
 }
 
 async fn deadline<F: Future>(

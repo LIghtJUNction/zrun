@@ -15,6 +15,8 @@ import time
 
 SCRIPT = "sleep 0.05; printf zrun"
 REUSE = {"scope": "agent-load", "input_revision": "fixed-v1", "ttl_ms": 30_000}
+LARGE_SCRIPT = """head -c 65536 /dev/zero | tr '\\000' '"'; head -c 65536 /dev/zero | tr '\\000' '"' >&2"""
+LARGE_OUTPUT = {"encoding": "utf8", "data": '"' * 65536}
 
 
 def process_sample(pid):
@@ -36,10 +38,7 @@ def process_sample(pid):
         return (0, 0, 0)
 
 
-async def request(path, index, mode):
-    arguments = {"script": SCRIPT}
-    if mode == "reuse":
-        arguments["reuse"] = REUSE
+def command_post(index, arguments):
     body = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -49,18 +48,29 @@ async def request(path, index, mode):
         },
         separators=(",", ":"),
     ).encode()
+    return (
+        f"POST /mcp HTTP/1.1\r\nHost: zrun\r\nAccept: application/json, text/event-stream\r\n"
+        f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+
+
+async def response_length(reader):
+    head = (await reader.readuntil(b"\r\n\r\n")).decode()
+    assert head.split()[1] == "200", head
+    headers = dict(line.split(":", 1) for line in head.splitlines()[1:] if line)
+    return int(headers["Content-Length"])
+
+
+async def request(path, index, mode):
+    arguments = {"script": SCRIPT}
+    if mode == "reuse":
+        arguments["reuse"] = REUSE
     reader, writer = await asyncio.open_unix_connection(path)
     try:
-        writer.write(
-            f"POST /mcp HTTP/1.1\r\nHost: zrun\r\nAccept: application/json, text/event-stream\r\n"
-            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode()
-            + body
-        )
+        writer.write(command_post(index, arguments))
         await writer.drain()
-        head = (await reader.readuntil(b"\r\n\r\n")).decode()
-        assert head.split()[1] == "200", head
-        headers = dict(line.split(":", 1) for line in head.splitlines()[1:] if line)
-        result = json.loads(await reader.readexactly(int(headers["Content-Length"])))
+        result = json.loads(await reader.readexactly(await response_length(reader)))
         assert result["id"] == index and not result["result"]["isError"], result
         delivery = result["result"]["structuredContent"]
         assert delivery["result"]["stdout"] == {"encoding": "utf8", "data": "zrun"}, delivery
@@ -117,6 +127,81 @@ async def load(path, pid, agents, mode):
     }
 
 
+
+async def slow_output(path, pid, agents):
+    arguments = {"script": LARGE_SCRIPT, "reuse": REUSE}
+
+    async def open_request(index):
+        reader, writer = await asyncio.open_unix_connection(path, limit=1024)
+        try:
+            writer.write(command_post(index, arguments))
+            await writer.drain()
+            return reader, writer, await response_length(reader)
+        except BaseException:
+            writer.close()
+            await writer.wait_closed()
+            raise
+
+    async def verify(index, connection, disposition):
+        reader, _, length = connection
+        rpc = json.loads(await reader.readexactly(length))
+        assert rpc["id"] == index and not rpc["result"]["isError"]
+        delivery = rpc["result"]["structuredContent"]
+        assert json.loads(rpc["result"]["content"][0]["text"]) == delivery
+        assert delivery["disposition"] == disposition
+        result = delivery["result"]
+        assert result["exit_code"] == 0 and not result["truncated"]
+        assert result["stdout"] == result["stderr"] == LARGE_OUTPUT
+        return length
+
+    warm = await open_request(0)
+    try:
+        await verify(0, warm, "executed")
+    finally:
+        warm[1].close()
+        await warm[1].wait_closed()
+    idle_rss = process_sample(pid)[0]
+    connections = []
+    ready = asyncio.Event()
+    arrived = asyncio.Queue()
+
+    async def slow_client(index):
+        connection = await open_request(index)
+        connections.append(connection)
+        arrived.put_nowait(None)
+        await ready.wait()
+        return await verify(index, connection, "cached")
+
+    start = time.monotonic()
+    try:
+        async with asyncio.TaskGroup() as group:
+            calls = [group.create_task(slow_client(index)) for index in range(1, agents + 1)]
+            for _ in calls:
+                await arrived.get()
+            headers_s = time.monotonic() - start
+            # The transport pauses once its buffer exceeds 2 KiB. Allow one
+            # read to overshoot, then wait for the server to block on writing.
+            await asyncio.sleep(0.10)
+            held_rss, threads, children = process_sample(pid)
+            ready.set()
+        lengths = [call.result() for call in calls]
+    finally:
+        for _, writer, _ in connections:
+            writer.close()
+        await asyncio.gather(*(writer.wait_closed() for _, writer, _ in connections))
+    assert children == 0
+    return {
+        "mode": "slow-output",
+        "agents": agents,
+        "headers_s": headers_s,
+        "elapsed_s": time.monotonic() - start,
+        "warm_rss_kib": idle_rss,
+        "held_rss_kib": held_rss,
+        "held_threads": threads,
+        "held_children": children,
+        "verified_response_bytes": sum(lengths),
+    }
+
 def run(binary, agents, mode, workers):
     with tempfile.TemporaryDirectory(prefix="zrun-load-") as directory:
         path = Path(directory) / "run.sock"
@@ -135,6 +220,8 @@ def run(binary, agents, mode, workers):
                     raise TimeoutError("zrun daemon did not announce readiness")
                 announced = process.stderr.readline()
             assert announced.strip() == f"zrun: unix:{path}".encode(), announced
+            if mode == "slow-output":
+                return asyncio.run(asyncio.wait_for(slow_output(path, process.pid, agents), timeout=60))
             return asyncio.run(load(path, process.pid, agents, mode))
         finally:
             process.terminate()
@@ -147,10 +234,20 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--agents", type=int, default=1_000)
     parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--slow-output-baseline", type=Path, help="compare cached large output with this baseline daemon")
     parser.add_argument("--workers", type=int, choices=range(1,17), default=1)
     args = parser.parse_args()
     if not 1 <= args.agents <= 2_000 or args.rounds < 1:
         parser.error("agents must be 1..2000 and rounds must be positive")
+    if args.slow_output_baseline:
+        order = [("candidate", args.binary), ("baseline", args.slow_output_baseline)]
+        for round_number in range(args.rounds):
+            binaries = order if round_number % 2 == 0 else reversed(order)
+            for version, binary in binaries:
+                sample = run(binary.resolve(), args.agents, "slow-output", args.workers)
+                print(json.dumps({"round": round_number + 1, "version": version,
+                                  "workers": args.workers, **sample}), flush=True)
+        return
     for round_number in range(args.rounds):
         modes = ("live", "reuse") if round_number % 2 == 0 else ("reuse", "live")
         for mode in modes:
