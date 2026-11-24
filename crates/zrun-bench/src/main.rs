@@ -5,10 +5,11 @@ use std::{
     io::Write,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
@@ -42,7 +43,7 @@ impl Config {
         while let Some(key) = args.next() {
             if key == "--help" {
                 println!(
-                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|yield|wake_latency|external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
                 );
                 std::process::exit(0);
             }
@@ -75,6 +76,7 @@ impl Config {
             "spawn_join",
             "yield",
             "wake_latency",
+            "external_wake_latency",
             "pending_memory",
             "idle",
             "soak",
@@ -285,6 +287,103 @@ impl Future for WakeWork {
         cx.waker().wake_by_ref();
         Poll::Pending
     }
+}
+
+type WakeSample = (usize, Option<u64>);
+
+struct ExternalWake {
+    index: usize,
+    sampled: bool,
+    signal: Arc<OnceLock<Option<Instant>>>,
+    register: Option<mpsc::Sender<WakeRegistration>>,
+}
+
+struct WakeRegistration {
+    sampled: bool,
+    signal: Arc<OnceLock<Option<Instant>>>,
+    waker: Waker,
+}
+
+impl Future for ExternalWake {
+    type Output = WakeSample;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(start) = self.signal.get() {
+            return Poll::Ready((self.index, start.map(|t| t.elapsed().as_nanos() as u64)));
+        }
+        if let Some(register) = self.register.take() {
+            register
+                .send(WakeRegistration {
+                    sampled: self.sampled,
+                    signal: self.signal.clone(),
+                    waker: cx.waker().clone(),
+                })
+                .expect("the benchmark producer receives every registration");
+        }
+        Poll::Pending
+    }
+}
+
+fn external_wake_samples<E: Engine>(
+    runtime: &mut E,
+    tasks: usize,
+    count: usize,
+) -> Result<Vec<u64>, String> {
+    let (register, ready) = mpsc::channel::<WakeRegistration>();
+    let producer = std::thread::Builder::new()
+        .name("external-wake".into())
+        .spawn(move || {
+            let mut registered = Vec::with_capacity(tasks);
+            for _ in 0..tasks {
+                registered.push(ready.recv().map_err(|error| error.to_string())?);
+            }
+            for entry in registered {
+                let start = entry.sampled.then(Instant::now);
+                entry.signal.set(start).expect("one external wake per task");
+                entry.waker.wake();
+            }
+            Ok::<_, String>(())
+        })
+        .map_err(|error| error.to_string())?;
+    let mut handles = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        handles.push(runtime.spawn(ExternalWake {
+            index,
+            sampled: index * count / tasks != (index + 1) * count / tasks,
+            signal: Arc::new(OnceLock::new()),
+            register: Some(register.clone()),
+        })?);
+    }
+    drop(register);
+    let samples = join_wake_samples(runtime, handles, count);
+    producer
+        .join()
+        .map_err(|_| "external wake producer panicked")??;
+    samples
+}
+
+fn join_wake_samples<E: Engine>(
+    runtime: &mut E,
+    handles: Vec<E::Handle<WakeSample>>,
+    count: usize,
+) -> Result<Vec<u64>, String> {
+    let samples = runtime.block_on(async {
+        let mut samples = Vec::with_capacity(count);
+        for (expected, handle) in handles.into_iter().enumerate() {
+            let (index, latency) = handle.await?;
+            if index != expected {
+                return Err("wake task identity mismatch".to_string());
+            }
+            if let Some(latency) = latency {
+                samples.push(latency);
+            }
+        }
+        Ok(samples)
+    })?;
+    if samples.len() != count {
+        return Err("missing latency samples".into());
+    }
+    Ok(samples)
 }
 
 struct PendingWork {
@@ -535,36 +634,37 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
                 "yield_process_cpu_ns": cpu_ns,
                 "yield_cpu_ns_per_wake": cpu_ns.map(|time| time as f64 / ops as f64)});
         }
-        "wake_latency" => {
+        "wake_latency" | "external_wake_latency" => {
             let count = c.tasks.min(c.latency_samples);
-            let mut handles = Vec::with_capacity(c.tasks);
-            for index in 0..c.tasks {
-                let sampled = index * count / c.tasks != (index + 1) * count / c.tasks;
-                handles.push(rt.spawn(WakeWork {
-                    index,
-                    sampled,
-                    armed: false,
-                    start: None,
-                })?);
-            }
-            let mut samples = rt.block_on(async {
-                let mut samples = Vec::with_capacity(count);
-                for (i, h) in handles.into_iter().enumerate() {
-                    let (index, ns) = h.await?;
-                    if index != i {
-                        return Err("wake task identity mismatch".to_string());
-                    }
-                    if let Some(ns) = ns {
-                        samples.push(ns);
-                    }
+            let (mut samples, prefix) = if c.scenario == "external_wake_latency" {
+                (
+                    external_wake_samples(&mut rt, c.tasks, count)?,
+                    "external_wake",
+                )
+            } else {
+                let mut handles = Vec::with_capacity(c.tasks);
+                for index in 0..c.tasks {
+                    let sampled = index * count / c.tasks != (index + 1) * count / c.tasks;
+                    handles.push(rt.spawn(WakeWork {
+                        index,
+                        sampled,
+                        armed: false,
+                        start: None,
+                    })?);
                 }
-                Ok(samples)
-            })?;
-            if samples.len() != count {
-                return Err("missing latency samples".into());
-            }
-            metrics = json!({"wake_p50_ns": percentile(&mut samples, 0.5),
-                "wake_p95_ns": percentile(&mut samples, 0.95), "wake_p99_ns": percentile(&mut samples, 0.99)});
+                (join_wake_samples(&mut rt, handles, count)?, "wake")
+            };
+            metrics = Value::Object(
+                [("p50", 0.50), ("p95", 0.95), ("p99", 0.99)]
+                    .into_iter()
+                    .map(|(name, q)| {
+                        (
+                            format!("{prefix}_{name}_ns"),
+                            json!(percentile(&mut samples, q)),
+                        )
+                    })
+                    .collect(),
+            );
             result["latency_samples_ns"] = json!(samples);
             checksum = c.tasks as u64 * (c.tasks as u64 - 1) / 2;
         }

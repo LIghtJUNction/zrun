@@ -23,7 +23,7 @@ import time
 import tomllib
 import unittest
 
-SCENARIOS = ("spawn_join", "yield", "wake_latency", "pending_memory", "idle")
+SCENARIOS = ("spawn_join", "yield", "wake_latency", "external_wake_latency", "pending_memory", "idle")
 TASK_SCALES = (1000, 10000, 100000, 1000000)
 WORKERS = (1, 2, 4, 8, 16)
 METRICS = {
@@ -31,6 +31,7 @@ METRICS = {
     "wake_ops_per_sec": ("yield", "higher", 1.20, 2.00, "wakes/s"),
     "yield_cpu_ns_per_wake": ("yield", "lower", 0.85, 0.50, "CPU ns/wake"),
     "wake_p99_ns": ("wake_latency", "lower", 1.00, 0.70, "ns"),
+    "external_wake_p99_ns": ("external_wake_latency", "lower", 1.00, 0.70, "ns"),
     "pending_bytes_per_task": ("pending_memory", "lower", 0.85, 0.60, "bytes/task"),
     "idle_rss_delta_bytes": ("idle", "lower", 0.80, 0.50, "bytes"),
 }
@@ -280,7 +281,7 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     for key, expected in {"yields": yields, "latency_samples": latency_samples, "hold_ms": hold_ms}.items():
         if config.get(key) != expected:
             return f"configuration mismatch: {key}"
-    if scenario in ("spawn_join", "yield", "wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
+    if scenario in ("spawn_join", "yield", "wake_latency", "external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
         return "checksum mismatch"
     if scenario == "pending_memory" and (raw.get("pending_polled_tasks") != tasks or raw.get("cancelled_tasks") != tasks):
         return "pending task accounting mismatch"
@@ -296,12 +297,13 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
             or not math.isclose(per_wake, cpu / (tasks * yields), rel_tol=1e-12)
         ):
             return "invalid CPU measurement or wake count"
-    if scenario == "wake_latency":
+    if scenario in ("wake_latency", "external_wake_latency"):
         values = raw.get("latency_samples_ns")
         if not isinstance(values, list) or len(values) != min(tasks, latency_samples) or not all(finite_number(v) and v >= 0 for v in values):
             return "invalid raw latency samples"
         expected = quantile(values, 0.99)
-        actual = raw["metrics"].get("wake_p99_ns")
+        metric = "wake_p99_ns" if scenario == "wake_latency" else "external_wake_p99_ns"
+        actual = raw["metrics"].get(metric)
         if not finite_number(actual) or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-6):
             return "P99 disagrees with raw latency samples"
     return None
@@ -353,7 +355,7 @@ def summarize(records, args):
     return {"metrics": cells, "full_project_gate": "not_evaluated",
             "unsupported": [{"metric": "tcp_throughput", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_min": 1.00, "normal_operator": ">", "challenge_ratio_min": 1.20},
                             {"metric": "tcp_p99", "reason": "use scripts/benchmark_tcp.py for the separate TCP comparator", "normal_ratio_max": 1.00, "normal_operator": "<", "challenge_ratio_max": 0.80}],
-            "latency_note": "Per-process wake_p99_ns is summarized across independent processes; not a pooled latency P99.",
+            "latency_note": "Self-wake and external-wake P99 are summarized separately across independent processes.",
             "decision_rule": "At least 10 complete positive pairs, release binary, and entire paired-bootstrap 95% CI beyond threshold. No multiplicity correction; exploratory per-cell decisions."}
 
 
