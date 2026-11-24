@@ -208,6 +208,7 @@ impl SharedPool {
         own: usize,
         retained: &mut VecDeque<TaskRef>,
         retained_turns: &mut usize,
+        allow_steal: bool,
     ) -> Option<TaskRef> {
         let worker = &self.workers[own];
         let pop_ready = || lock(&worker.ready).pop_front();
@@ -227,7 +228,7 @@ impl SharedPool {
         *retained_turns = RETAINED_TURNS;
         pop_ready()
             .or_else(pop_retained)
-            .or_else(|| self.steal(own))
+            .or_else(|| allow_steal.then(|| self.steal(own)).flatten())
     }
 
     fn steal(&self, own: usize) -> Option<TaskRef> {
@@ -293,6 +294,7 @@ impl SharedPool {
     fn work(
         self: &Arc<Self>,
         own: usize,
+        speculative_steal: bool,
         #[cfg(feature = "io")] mut poller: Option<zrun_io::Poller>,
     ) {
         let identity = Arc::as_ptr(self) as usize;
@@ -328,41 +330,42 @@ impl SharedPool {
                 }
                 io_budget -= 1;
             }
-            let task = match self.next_task(own, &mut retained, &mut retained_turns) {
-                Some(task) => task,
-                None => {
-                    worker.parker.parking.arm();
-                    if self.closed.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let task = self.next_task(own, &mut retained, &mut retained_turns);
-                    if task.is_none() {
-                        #[cfg(feature = "io")]
-                        if let Some(poller) = &mut poller {
-                            let result = poller.poll(self.clock.next_timeout());
-                            worker.parker.parking.disarm();
-                            if result.is_err() {
-                                self.close();
-                                break;
-                            }
-                            io_budget = 32;
-                            continue;
+            let task =
+                match self.next_task(own, &mut retained, &mut retained_turns, speculative_steal) {
+                    Some(task) => task,
+                    None => {
+                        worker.parker.parking.arm();
+                        if self.closed.load(Ordering::Acquire) {
+                            break;
                         }
-                        if own == 0 {
-                            match self.clock.next_timeout() {
-                                Some(timeout) if timeout.is_zero() => {}
-                                Some(timeout) => thread::park_timeout(timeout),
-                                None => thread::park(),
+                        let task = self.next_task(own, &mut retained, &mut retained_turns, true);
+                        if task.is_none() {
+                            #[cfg(feature = "io")]
+                            if let Some(poller) = &mut poller {
+                                let result = poller.poll(self.clock.next_timeout());
+                                worker.parker.parking.disarm();
+                                if result.is_err() {
+                                    self.close();
+                                    break;
+                                }
+                                io_budget = 32;
+                                continue;
                             }
-                        } else {
-                            thread::park();
+                            if own == 0 {
+                                match self.clock.next_timeout() {
+                                    Some(timeout) if timeout.is_zero() => {}
+                                    Some(timeout) => thread::park_timeout(timeout),
+                                    None => thread::park(),
+                                }
+                            } else {
+                                thread::park();
+                            }
                         }
+                        worker.parker.parking.disarm();
+                        let Some(task) = task else { continue };
+                        task
                     }
-                    worker.parker.parking.disarm();
-                    let Some(task) = task else { continue };
-                    task
-                }
-            };
+                };
             task.run_owned(INLINE_REPOLLS, |task| {
                 // Only continuations may be retained. Fresh arrivals keep a
                 // turn after each bounded set of local polls.
@@ -546,6 +549,13 @@ impl Pool {
             workers: Vec::with_capacity(workers),
             root: Runtime::new(),
         };
+        // In worker-driven I/O pools, helpers avoid optimistic peer scans
+        // to reduce contention on the I/O worker's newly published work.
+        // Every helper still scans after arming its park handshake.
+        #[cfg(feature = "io")]
+        let worker_driven_io = poller.is_some();
+        #[cfg(not(feature = "io"))]
+        let worker_driven_io = false;
         for index in 0..workers {
             let shared = pool.shared.clone();
             #[cfg(feature = "io")]
@@ -555,6 +565,7 @@ impl Pool {
                 .spawn(move || {
                     shared.work(
                         index,
+                        !worker_driven_io || index == 0,
                         #[cfg(feature = "io")]
                         worker_poller,
                     );
