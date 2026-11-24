@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "zrun"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "libc",
  "zrun-executor",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-bench"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "libc",
  "serde_json",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-cli"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "httparse",
  "libc",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-executor"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "loom",
  "zrun-io",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-io"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "libc",
  "mio",
@@ -647,25 +647,25 @@ dependencies = [
 
 [[package]]
 name = "zrun-plugin-api"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "zplugin",
 ]
 
 [[package]]
 name = "zrun-sync"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 
 [[package]]
 name = "zrun-task"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 dependencies = [
  "loom",
 ]
 
 [[package]]
 name = "zrun-time"
-version = "0.1.0-p0.9"
+version = "0.1.0-p0.10"
 
 [[package]]
 name = "zsys"
