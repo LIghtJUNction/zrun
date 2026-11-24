@@ -59,10 +59,15 @@ fn parse(source: &str) -> io::Result<Vec<Step>> {
         let rest = rest.trim_start();
         match operation {
             "await" => {
-                if !pending.remove(rest) {
-                    return Err(fail("await requires the name of a pending task"));
+                for name in rest.split_whitespace() {
+                    if !pending.remove(name) {
+                        return Err(fail("await requires the names of pending tasks"));
+                    }
+                    if steps.len() == 8192 {
+                        return Err(fail("too many script steps"));
+                    }
+                    steps.push(Step::Await(name.into()));
                 }
-                steps.push(Step::Await(rest.into()));
             }
             "async" | "shell" => {
                 let (name, payload) = if operation == "async" {

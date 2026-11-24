@@ -476,14 +476,13 @@ fn native_script_jobs_overlap_and_emit_in_await_order() {
     fs::write(
         &path,
         r#"# zrun:1
-async first {"script":"touch first; while [ ! -f second ]; do sleep .01; done; printf first","timeout_ms":5000}
-async second {"script":"touch second; while [ ! -f first ]; do sleep .01; done; printf second","timeout_ms":5000}
-await second
-await first
+async first {"script":"touch first; while [ ! -f second ]; do sleep .01; done; printf first; exit 17","timeout_ms":5000}
+async second {"script":"touch second; while [ ! -f first ]; do sleep .01; done; printf second; exit 19","timeout_ms":5000}
+await second first
 "#,
     ).unwrap();
     let output = zrun().current_dir(&dir.0).arg(path).output().unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.status.code(), Some(19), "{:?}", output);
     assert_eq!(output.stdout, b"secondfirst");
 }
 
@@ -509,7 +508,7 @@ fn native_script_reuses_an_explicit_key_and_validates_before_running() {
 
     fs::write(
         &path,
-        "# zrun:1\nshell <<END\ntouch unexpected\nEND\nawait missing\n",
+        "# zrun:1\nshell <<END\ntouch unexpected\nEND\nasync known {\"script\":\"true\"}\nawait known missing\n",
     )
     .unwrap();
     let output = zrun().current_dir(&dir.0).arg(path).output().unwrap();
