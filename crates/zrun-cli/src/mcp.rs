@@ -1,6 +1,8 @@
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -330,6 +332,7 @@ enum RemoteBatch {
 pub(crate) fn run_remote(
     path: PathBuf,
     requests: Vec<Request>,
+    ready_order: bool,
     mut record: impl FnMut(usize, Delivery) -> io::Result<()>,
 ) -> io::Result<()> {
     if requests.len() > 4096 {
@@ -400,11 +403,25 @@ pub(crate) fn run_remote(
                     .map_err(io::Error::other)?;
                 active.push_back((id, job));
             }
-            let (id, job) = active
-                .pop_front()
-                .expect("at least one active remote batch");
-            for (index, delivery) in job
-                .await
+            let (id, deliveries) = if ready_order {
+                let (slot, result) = poll_fn(|cx| {
+                    for (slot, (_, job)) in active.iter_mut().enumerate() {
+                        if let Poll::Ready(result) = Pin::new(job).poll(cx) {
+                            return Poll::Ready((slot, result));
+                        }
+                    }
+                    Poll::Pending
+                })
+                .await;
+                let (id, _) = active.remove(slot).expect("polled active batch");
+                (id, result)
+            } else {
+                let (id, job) = active
+                    .pop_front()
+                    .expect("at least one active remote batch");
+                (id, job.await)
+            };
+            for (index, delivery) in deliveries
                 .map_err(io::Error::other)??
                 .into_iter()
                 .enumerate()

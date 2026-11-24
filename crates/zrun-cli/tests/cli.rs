@@ -427,6 +427,40 @@ fn remote_batch_window_overlaps_requests_and_preserves_output_order() {
 }
 
 #[test]
+fn remote_batch_ready_refills_the_window_behind_a_blocked_first_batch() {
+    let directory = Directory::new();
+    let socket = directory.0.join("zrun.sock");
+    let (_server, mut stderr) = start(zrun().args(["mcp", "--unix"]).arg(&socket));
+    assert!(startup(&mut stderr).starts_with("zrun: unix:"));
+    let input = (0..33)
+        .map(|index| {
+            let script = match index {
+                0 => "while [ ! -f third ]; do sleep .01; done",
+                32 => "touch third",
+                _ => "true",
+            };
+            format!("{}\n", json!({"script":script,"timeout_ms":5000}))
+        })
+        .collect::<String>();
+    let mut client = zrun();
+    client
+        .args(["batch", "--ready"])
+        .current_dir(&directory.0)
+        .env("ZRUN_SOCKET", &socket)
+        .env("ZRUN_BATCH_WINDOW", "2");
+    let records = lines(&process_input(client, &input));
+    assert_eq!(records.len(), 33);
+    assert_eq!(records[0]["index"], 16);
+    let mut indexes = Vec::new();
+    for record in &records {
+        indexes.push(record["index"].as_u64().unwrap());
+        assert_eq!(record["result"]["exit_code"], 0, "{record}");
+    }
+    indexes.sort_unstable();
+    assert!(indexes.into_iter().eq(0..33));
+}
+
+#[test]
 fn local_stdio_negotiates_tools_and_zguard_checks_before_reading_cache() {
     let directory = Directory::new();
     let policy = directory.0.join("policy.json");

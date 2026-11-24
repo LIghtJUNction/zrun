@@ -34,7 +34,7 @@ const HELP: &str = "Usage:
   zrun FILE.zrun [ARGS...]        Run a shell file or a # zrun:1 async program
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
-  zrun batch                      Run a batch of command objects from JSONL stdin
+  zrun batch [--ready]            Run JSONL commands, optionally emit ready remote batches
   zrun mcp [--stdio | --http ADDRESS [--unix [PATH]] | --unix [PATH]]
   zrun --zmem CLASS [COMMAND...]  Run zrun and its child commands in one zmem scope
   zrun --help
@@ -162,13 +162,15 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             managed(
                 shell()?,
                 Some(script.into_string().map_err(|_| "script is not UTF-8")?),
+                false,
             )
         }
         Some("batch") => {
+            let ready_order = args.next_if(|arg| arg == "--ready").is_some();
             if args.next().is_some() {
                 return Err("zrun batch takes commands from stdin".into());
             }
-            managed(shell()?, None)
+            managed(shell()?, None, ready_order)
         }
         _ => {
             let interactive = first.is_none() && io::stdin().is_terminal();
@@ -414,7 +416,11 @@ fn read_batch(
 }
 
 #[cfg(target_os = "linux")]
-fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::error::Error>> {
+fn managed(
+    shell: PathBuf,
+    script: Option<String>,
+    ready_order: bool,
+) -> Result<u8, Box<dyn std::error::Error>> {
     use execution::Request;
 
     let requests = if let Some(script) = script {
@@ -428,7 +434,7 @@ fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::er
             #[serde(flatten)]
             delivery: execution::Delivery,
         }
-        execute_batch(shell, requests, |index, delivery| {
+        execute_batch(shell, requests, ready_order, |index, delivery| {
             serde_json::to_writer(&mut output, &Record { index, delivery })?;
             writeln!(output)
         })?;
@@ -436,7 +442,7 @@ fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::er
         return Ok(0);
     };
     let mut status = 1;
-    execute_batch(shell, requests, |_, delivery| {
+    execute_batch(shell, requests, false, |_, delivery| {
         let result = delivery.result;
         io::stdout().lock().write_all(&result.stdout)?;
         io::stderr().lock().write_all(&result.stderr)?;
@@ -453,7 +459,11 @@ fn managed(shell: PathBuf, script: Option<String>) -> Result<u8, Box<dyn std::er
 }
 
 #[cfg(not(target_os = "linux"))]
-fn managed(_shell: PathBuf, _script: Option<String>) -> Result<u8, Box<dyn std::error::Error>> {
+fn managed(
+    _shell: PathBuf,
+    _script: Option<String>,
+    _ready_order: bool,
+) -> Result<u8, Box<dyn std::error::Error>> {
     Err("managed command execution currently requires Linux".into())
 }
 
@@ -461,10 +471,11 @@ fn managed(_shell: PathBuf, _script: Option<String>) -> Result<u8, Box<dyn std::
 fn execute_batch(
     shell: PathBuf,
     requests: Vec<execution::Request>,
+    ready_order: bool,
     record: impl FnMut(usize, execution::Delivery) -> io::Result<()>,
 ) -> io::Result<()> {
     if let Some(path) = env::var_os("ZRUN_SOCKET") {
-        mcp::run_remote(PathBuf::from(path), requests, record)
+        mcp::run_remote(PathBuf::from(path), requests, ready_order, record)
     } else {
         execution::Batch::new(shell)?.execute(requests, record)
     }
