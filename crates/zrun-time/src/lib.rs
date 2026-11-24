@@ -144,8 +144,14 @@ impl Sleep {
         if let Some(key) = self.key.take()
             && let Some(inner) = self.inner.upgrade()
         {
-            let removed = { lock(&inner.state).entries.remove(&key) };
-            let changed = removed.is_some();
+            let (removed, changed) = {
+                let mut state = lock(&inner.state);
+                let changed = state
+                    .entries
+                    .first_key_value()
+                    .is_some_and(|(first, _)| *first == key);
+                (state.entries.remove(&key), changed)
+            };
             drop(removed);
             if changed {
                 (inner.notify)();
@@ -226,8 +232,12 @@ impl Timer {
                     let key = (deadline, state.next_id);
                     state.next_id = next_id;
                     let waiter = Arc::new(Waiter::pending());
+                    let changed = state
+                        .entries
+                        .first_key_value()
+                        .is_none_or(|(first, _)| key < *first);
                     state.entries.insert(key, waiter.clone());
-                    Ok((key, waiter))
+                    Ok((key, waiter, changed))
                 } else {
                     Err(TimerError::IdExhausted)
                 }
@@ -236,8 +246,12 @@ impl Timer {
             }
         };
         match admitted {
-            Ok((key, waiter)) => {
-                (inner.notify)();
+            Ok((key, waiter, changed)) => {
+                // A driver already waiting for an earlier deadline will
+                // inspect the queue again before it waits past this entry.
+                if changed {
+                    (inner.notify)();
+                }
                 Sleep {
                     inner: Arc::downgrade(&inner),
                     key: Some(key),
@@ -370,6 +384,33 @@ mod tests {
 
     fn poll_sleep(sleep: &mut Sleep) -> Poll<Result<(), TimerError>> {
         Pin::new(sleep).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn only_earliest_deadline_changes_notify_the_driver() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let count = notifications.clone();
+        let driver = Driver::new(
+            8,
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let timer = driver.timer();
+        let first = timer.sleep(Duration::from_secs(300));
+        let later = timer.sleep(Duration::from_secs(600));
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        drop(later);
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        let earliest = timer.sleep(Duration::from_secs(60));
+        assert_eq!(notifications.load(Ordering::Relaxed), 2);
+        drop(earliest);
+        assert_eq!(notifications.load(Ordering::Relaxed), 3);
+        drop(first);
+        assert_eq!(notifications.load(Ordering::Relaxed), 4);
+        assert!(driver.is_empty());
     }
 
     #[test]
