@@ -15,3 +15,9 @@
 | reuse | 0.190 s | 10513 | 189.6 ms | 7352 KiB | 1 |
 
 原始数据 `dist/zrun-p04-agent-load-2000.jsonl`，SHA256 `a2a62381104a57d75badba26acb2b6f9ecbe0bd3f1ca34038319060470b0053e`。五轮为描述性对照。
+
+## Project Z 互操作
+
+Linux p0.4 发行二进制与 zmcpio 0.5.3（`9c1d8df`）在默认 `$XDG_RUNTIME_DIR/zrun/mcp.sock` 完成 MCP 2025-11-25 初始化、工具发现和 `shell_run` 调用。通过 JSON `args` 传入含空格和星号的参数，shell 按字面值返回。测试同时校验目录 `0700`、socket `0600` 以及正常退出清理。
+
+以 zmem 0.4.5 启动 `zrun --zmem interactive mcp --unix PATH`，另一个 zrun 进程通过 socket 提交命令。用 `/proc` 核对 broker 和受管命令位于同一个 `zmem-interactive-*.scope`，服务正常退出并清理 socket。
