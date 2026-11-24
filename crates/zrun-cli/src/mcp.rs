@@ -1,8 +1,6 @@
 use std::future::Future;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
-use std::pin::pin;
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -312,19 +310,13 @@ async fn deadline_at<F: Future>(
     timer: &zrun::Timer,
     expires: Instant,
 ) -> io::Result<F::Output> {
-    let mut future = pin!(future);
-    let mut deadline = pin!(timer.sleep_until(expires));
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(value) = future.as_mut().poll(cx) {
-            return Poll::Ready(Ok(value));
-        }
-        match deadline.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Err(io::ErrorKind::TimedOut.into())),
-            Poll::Ready(Err(error)) => Poll::Ready(Err(io::Error::other(error))),
-            Poll::Pending => Poll::Pending,
-        }
-    })
-    .await
+    timer
+        .timeout_at(expires, future)
+        .await
+        .map_err(|error| match error {
+            zrun::TimeoutError::Elapsed => io::ErrorKind::TimedOut.into(),
+            zrun::TimeoutError::Timer(error) => io::Error::other(error),
+        })
 }
 
 pub(crate) fn run_remote(

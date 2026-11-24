@@ -21,7 +21,7 @@ P0 可以使用标准库提供的原子、互斥锁、线程 park/unpark 和堆�
 
 `JoinHandle` 的 Future 输出是 `Result<T, JoinError>`。丢弃 join handle 会分离结果等待；`abort()` 显式请求取消。取消与完成竞争时，保留已经完成的结果；尚未完成的 Future 在拥有它的执行器线程处理终止。任务 panic 与取消应有可区分的错误。所有已接收任务最终只产生一个终止结果，Future 与结果各自只释放一次。
 
-`Runtime::timer()` 返回可克隆的 Timer。`Timer::sleep(duration)` 和 `Timer::sleep_until(deadline)` 都产生 Sleep Future，分别使用相对时长与绝对单调时钟截止时间；驱动器负责到期唤醒，关闭时返回明确错误。没有每个定时器一个线程。正在等待的 timer 必须能注册和替换 waker，取消的定时器不得导致持续增长的保留内存。
+`Runtime::timer()` 返回可克隆的 Timer。`Timer::sleep(duration)` 和 `Timer::sleep_until(deadline)` 都产生 Sleep Future，分别使用相对时长与绝对单调时钟截止时间；驱动器负责到期唤醒，关闭时返回明确错误。`Timer::timeout_at(deadline, future)` 为任意 Future 设置同一时钟上的截止时间，立即就绪的工作不占定时器名额。没有每个定时器一个线程。正在等待的 timer 必须能注册和替换 waker，取消的定时器不得导致持续增长的保留内存。
 
 P0 支持跨线程唤醒和通过 Spawner 提交 Send Future，但只有调用 block_on 的线程执行 poll。多 worker 调度属于 P1；不能把线程安全的唤醒入口计为 P1 已完成。
 

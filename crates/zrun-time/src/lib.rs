@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -46,6 +46,31 @@ impl fmt::Display for TimerError {
 }
 
 impl std::error::Error for TimerError {}
+
+/// An operation missed its deadline or its timer could not run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimeoutError {
+    Elapsed,
+    Timer(TimerError),
+}
+
+impl fmt::Display for TimeoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Elapsed => f.write_str("operation deadline elapsed"),
+            Self::Timer(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TimeoutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Elapsed => None,
+            Self::Timer(error) => Some(error),
+        }
+    }
+}
 
 enum Status {
     Pending,
@@ -257,6 +282,37 @@ impl Timer {
         })
     }
 
+    /// Run a future until an absolute monotonic deadline.
+    ///
+    /// Polls the future first on each turn. A result that is ready on the same
+    /// turn as the deadline wins. An immediately ready future uses no timer
+    /// slot. Dropping the returned future cancels any registered deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeoutError::Elapsed`] when the deadline wins, or
+    /// [`TimeoutError::Timer`] when the timer cannot be driven.
+    pub async fn timeout_at<F: Future>(
+        &self,
+        deadline: Instant,
+        future: F,
+    ) -> Result<F::Output, TimeoutError> {
+        let mut future = pin!(future);
+        let mut sleep = None;
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = future.as_mut().poll(cx) {
+                return Poll::Ready(Ok(result));
+            }
+            let sleep = sleep.get_or_insert_with(|| self.sleep_until(deadline));
+            match Pin::new(sleep).poll(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Err(TimeoutError::Elapsed)),
+                Poll::Ready(Err(error)) => Poll::Ready(Err(TimeoutError::Timer(error))),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
+
     fn schedule(&self, deadline: Deadline) -> Sleep {
         let Some(inner) = self.inner.upgrade() else {
             return Sleep::ready(Err(TimerError::Closed));
@@ -463,6 +519,37 @@ mod tests {
         drop(first);
         assert_eq!(notifications.load(Ordering::Relaxed), 4);
         assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn timeout_prioritizes_ready_work_and_releases_pending_timers() {
+        use std::future::{pending, ready};
+
+        let driver = driver(1);
+        let timer = driver.timer();
+        let now = Instant::now();
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(
+            pin!(timer.timeout_at(now, ready(7))).poll(&mut context),
+            Poll::Ready(Ok(7))
+        );
+        assert_eq!(
+            pin!(timer.timeout_at(now, pending::<()>())).poll(&mut context),
+            Poll::Ready(Err(TimeoutError::Elapsed))
+        );
+        assert!(driver.is_empty());
+        {
+            let mut future =
+                pin!(timer.timeout_at(now + Duration::from_secs(600), pending::<()>()));
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            assert_eq!(driver.len(), 1);
+        }
+        assert!(driver.is_empty());
+        driver.shutdown();
+        assert_eq!(
+            pin!(timer.timeout_at(now, pending::<()>())).poll(&mut context),
+            Poll::Ready(Err(TimeoutError::Timer(TimerError::Closed)))
+        );
     }
 
     #[test]

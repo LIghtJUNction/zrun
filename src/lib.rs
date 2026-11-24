@@ -2,7 +2,7 @@
 pub use zrun_executor::{Pool, PoolSpawner, Runtime, RuntimeStats, SpawnError, Spawner};
 pub use zrun_sync as sync;
 pub use zrun_task::{JoinError, JoinHandle, yield_now};
-pub use zrun_time::{Sleep, Timer, TimerError};
+pub use zrun_time::{Sleep, TimeoutError, Timer, TimerError};
 
 #[cfg(feature = "io")]
 pub use zrun_io as io;
