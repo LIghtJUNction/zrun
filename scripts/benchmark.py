@@ -504,8 +504,10 @@ def main():
                             break
                         sample = collect_sample(args, output, i, tasks, scenario, engine, workers=workers)
                         report["samples"].append(sample)
-                        atomic_json(output / "report.json", report)
                         print(f"round={i + 1}/{args.rounds} workers={workers} tasks={tasks} scenario={scenario} engine={engine} status={sample['status']}", flush=True)
+        if STOP_REQUESTED:
+            break
+        atomic_json(output / "report.json", report)
     report["status"] = "cancelled" if STOP_REQUESTED else "completed"
     if not STOP_REQUESTED and any(s["status"] != "ok" for s in report["samples"]):
         report["status"] = "completed_with_errors"
