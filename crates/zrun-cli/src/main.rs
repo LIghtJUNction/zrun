@@ -1,6 +1,8 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal};
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
