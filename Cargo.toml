@@ -1,6 +1,6 @@
 [package]
 name = "zrun"
-version = "0.1.0-p0.7"
+version = "0.1.0-p0.8"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
@@ -18,11 +18,11 @@ io = ["dep:zrun-io", "zrun-executor/io"]
 process = ["io", "dep:libc"]
 
 [dependencies]
-zrun-executor = { version = "=0.1.0-p0.7", path = "crates/zrun-executor" }
-zrun-task = { version = "=0.1.0-p0.7", path = "crates/zrun-task" }
-zrun-time = { version = "=0.1.0-p0.7", path = "crates/zrun-time" }
-zrun-sync = { version = "=0.1.0-p0.7", path = "crates/zrun-sync" }
-zrun-io = { version = "=0.1.0-p0.7", path = "crates/zrun-io", optional = true }
+zrun-executor = { version = "=0.1.0-p0.8", path = "crates/zrun-executor" }
+zrun-task = { version = "=0.1.0-p0.8", path = "crates/zrun-task" }
+zrun-time = { version = "=0.1.0-p0.8", path = "crates/zrun-time" }
+zrun-sync = { version = "=0.1.0-p0.8", path = "crates/zrun-sync" }
+zrun-io = { version = "=0.1.0-p0.8", path = "crates/zrun-io", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
