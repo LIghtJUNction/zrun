@@ -623,6 +623,7 @@ fn resolve_directory(base: &Path, cwd: Option<&Path>) -> io::Result<PathBuf> {
 }
 
 async fn worker(shared: Arc<Shared>, slot: usize) {
+    let mut valkey = crate::valkey::Connection::default();
     loop {
         let job = poll_fn(|cx| {
             let incoming = cx.waker().clone();
@@ -644,7 +645,11 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
             Some((cache, key, ttl))
         });
         let hit = match &remote {
-            Some((cache, key, ttl)) => cache.get(&shared.io, &shared.timer, key, *ttl).await,
+            Some((cache, key, ttl)) => {
+                cache
+                    .get(&mut valkey, &shared.io, &shared.timer, key, *ttl)
+                    .await
+            }
             None => None,
         };
         let cached = hit.is_some();
@@ -670,7 +675,7 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
                     && result.cacheable()
                 {
                     cache
-                        .set(&shared.io, &shared.timer, &key, ttl, &result)
+                        .set(&mut valkey, &shared.io, &shared.timer, &key, ttl, &result)
                         .await;
                 }
                 (result, expires)

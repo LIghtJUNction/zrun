@@ -75,7 +75,7 @@ export ZRUN_VALKEY_DOMAIN=team_a
 export ZRUN_VALKEY_TOOL_REVISION=toolchain-2026-11
 ```
 
-对通过授权且 `reuse.ttl_ms > 0` 的调用，zrun 本地未命中后最多等待 50 ms 查询 Valkey。同进程的相同在途请求共用一次查询或执行。命令成功且输出完整时用 `SET … PX` 写入，写入失败不影响命令结果。连接中断、超时或无效值按未命中处理。二级命中回填本地缓存时使用剩余有效期。跨进程共享的是已完成结果。
+对通过授权且 `reuse.ttl_ms > 0` 的调用，zrun 本地未命中后最多等待 50 ms 查询 Valkey。同进程的相同在途请求共用一次查询或执行。命令成功且输出完整时用 `SET … PX` 写入，写入失败不影响命令结果。连接中断、超时或无效值按未命中处理。每个 broker 命令 worker 最多保留一个空闲 Valkey 连接。连接只有在完整收取响应后才可复用。二级命中回填本地缓存时使用剩余有效期。跨进程共享的是已完成结果。
 
 键以前缀 `zrun:v1:<domain>:` 隔离，摘要包含脚本、位置参数、解析后的目录、超时、原有复用参数、zrun 版本、shell 路径、继承环境和工具版本。更新工具、shell 或会影响结果的执行配置时应更新 `ZRUN_VALKEY_TOOL_REVISION`。工作树与文件输入仍由调用方通过 `input_revision` 标识。选择同一信任域的进程必须信任 Valkey 中的值；使用隔离的 socket 或 Valkey 访问控制限制不同信任域的读写权限。只支持本机 Unix socket。
 

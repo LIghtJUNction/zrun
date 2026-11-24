@@ -18,6 +18,9 @@ pub(crate) struct Valkey {
     environment: Sha256,
 }
 
+#[derive(Default)]
+pub(crate) struct Connection(Option<Stream>);
+
 #[derive(Serialize)]
 struct Stored<'a> {
     expires_ms: u64,
@@ -81,21 +84,23 @@ impl Valkey {
 
     pub(crate) async fn get(
         &self,
+        connection: &mut Connection,
         io: &Handle,
         timer: &Timer,
         key: &str,
         ttl: u64,
     ) -> Option<(ResultRecord, Instant)> {
-        timer
-            .timeout_at(Instant::now() + TIMEOUT, async {
-                let mut socket = io.connect_unix(&self.path).await.ok()?;
+        connection
+            .exchange(&self.path, io, timer, async |socket| {
                 socket
                     .write_all(&command(&[b"GET", key.as_bytes()]))
                     .await
                     .ok()?;
-                let size = read_size(&mut socket).await?;
+                let Some(size) = read_size(socket).await? else {
+                    return Some(None);
+                };
                 let mut payload = vec![0; size + 2];
-                read_exact(&mut socket, &mut payload).await?;
+                read_exact(socket, &mut payload).await?;
                 if payload[size..] != *b"\r\n" {
                     return None;
                 }
@@ -106,21 +111,21 @@ impl Valkey {
                 {
                     return None;
                 }
-                let remaining = hit.expires_ms.checked_sub(now_ms()?)?.min(ttl);
-                (remaining > 0).then(|| {
+                let remaining = hit.expires_ms.saturating_sub(now_ms()?).min(ttl);
+                Some((remaining > 0).then(|| {
                     (
                         hit.result,
                         Instant::now() + Duration::from_millis(remaining),
                     )
-                })
+                }))
             })
             .await
-            .ok()
             .flatten()
     }
 
     pub(crate) async fn set(
         &self,
+        connection: &mut Connection,
         io: &Handle,
         timer: &Timer,
         key: &str,
@@ -137,9 +142,8 @@ impl Valkey {
             return;
         }
         let expiry = ttl.to_string();
-        let _ = timer
-            .timeout_at(Instant::now() + TIMEOUT, async {
-                let mut socket = io.connect_unix(&self.path).await.ok()?;
+        connection
+            .exchange(&self.path, io, timer, async |socket| {
                 socket
                     .write_all(&command(&[
                         b"SET",
@@ -151,10 +155,37 @@ impl Valkey {
                     .await
                     .ok()?;
                 let mut reply = [0; 5];
-                read_exact(&mut socket, &mut reply).await?;
+                read_exact(socket, &mut reply).await?;
                 (reply == *b"+OK\r\n").then_some(())
             })
             .await;
+    }
+}
+
+impl Connection {
+    async fn exchange<T>(
+        &mut self,
+        path: &Path,
+        io: &Handle,
+        timer: &Timer,
+        operation: impl AsyncFnOnce(&mut Stream) -> Option<T>,
+    ) -> Option<T> {
+        // Keep the socket only after a complete exchange. A timed-out or
+        // cancelled operation can leave unread or partial RESP bytes.
+        let previous = self.0.take();
+        let (socket, result) = timer
+            .timeout_at(Instant::now() + TIMEOUT, async {
+                let mut socket = match previous {
+                    Some(socket) => socket,
+                    None => io.connect_unix(path).await.ok()?,
+                };
+                let result = operation(&mut socket).await?;
+                Some((socket, result))
+            })
+            .await
+            .ok()??;
+        self.0 = Some(socket);
+        Some(result)
     }
 }
 
@@ -182,7 +213,7 @@ fn command(args: &[&[u8]]) -> Vec<u8> {
     message
 }
 
-async fn read_size(socket: &mut Stream) -> Option<usize> {
+async fn read_size(socket: &mut Stream) -> Option<Option<usize>> {
     let mut prefix = [0; 1];
     read_exact(socket, &mut prefix).await?;
     if prefix != *b"$" {
@@ -193,7 +224,14 @@ async fn read_size(socket: &mut Stream) -> Option<usize> {
         read_exact(socket, &mut header[index..=index]).await?;
         if header[index] == b'\n' {
             let text = std::str::from_utf8(header[..index].strip_suffix(b"\r")?).ok()?;
-            return text.parse::<usize>().ok().filter(|&size| size <= MAX_VALUE);
+            return if text == "-1" {
+                Some(None)
+            } else {
+                text.parse::<usize>()
+                    .ok()
+                    .filter(|&size| size <= MAX_VALUE)
+                    .map(Some)
+            };
         }
     }
     None

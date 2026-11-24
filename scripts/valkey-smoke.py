@@ -21,7 +21,14 @@ with tempfile.TemporaryDirectory(prefix='zrun-valkey-test.') as work:
             row=run(**kwargs)[0]
             assert row['disposition']==expected, row
             return row
+        def connections():
+            info = subprocess.check_output(['valkey-cli', '-s', sock, 'INFO', 'stats'], text=True)
+            return int(next(line.split(':', 1)[1] for line in info.splitlines()
+                            if line.startswith('total_connections_received:')))
+
+        before = connections()
         observe('executed')
+        assert connections() - before == 2  # one GET/SET connection and one INFO
         observe('cached')
         keys=subprocess.check_output(['valkey-cli','-s',sock,'--scan'],text=True).splitlines()
         assert len(keys)==1 and keys[0].startswith('zrun:v1:team_a:')
