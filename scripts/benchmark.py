@@ -24,7 +24,7 @@ import tomllib
 import unittest
 
 DEFAULT_SCENARIOS = ("spawn_join", "yield", "wake_latency", "external_wake_latency", "pending_memory", "idle")
-SCENARIOS = (*DEFAULT_SCENARIOS, "batch_join")
+SCENARIOS = (*DEFAULT_SCENARIOS, "batch_join", "batch_external_wake_latency")
 TASK_SCALES = (1000, 10000, 100000, 1000000)
 WORKERS = (1, 2, 4, 8, 16)
 METRICS = {
@@ -33,6 +33,7 @@ METRICS = {
     "wake_ops_per_sec": ("yield", "higher", 1.20, 2.00, "wakes/s"),
     "yield_cpu_ns_per_wake": ("yield", "lower", 0.85, 0.50, "CPU ns/wake"),
     "wake_p99_ns": ("wake_latency", "lower", 1.00, 0.70, "ns"),
+    "batch_external_wake_p99_ns": ("batch_external_wake_latency", "lower", 1.00, 0.70, "ns"),
     "external_wake_p99_ns": ("external_wake_latency", "lower", 1.00, 0.70, "ns"),
     "pending_bytes_per_task": ("pending_memory", "lower", 0.85, 0.60, "bytes/task"),
     "idle_rss_delta_bytes": ("idle", "lower", 0.80, 0.50, "bytes"),
@@ -283,7 +284,7 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     for key, expected in {"yields": yields, "latency_samples": latency_samples, "hold_ms": hold_ms}.items():
         if config.get(key) != expected:
             return f"configuration mismatch: {key}"
-    if scenario in ("spawn_join", "batch_join", "yield", "wake_latency", "external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
+    if scenario in ("spawn_join", "batch_join", "yield", "wake_latency", "external_wake_latency", "batch_external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
         return "checksum mismatch"
     if scenario == "pending_memory" and (raw.get("pending_polled_tasks") != tasks or raw.get("cancelled_tasks") != tasks):
         return "pending task accounting mismatch"
@@ -309,12 +310,16 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
             or not math.isclose(per_wake, cpu / (tasks * yields), rel_tol=1e-12)
         ):
             return "invalid CPU measurement or wake count"
-    if scenario in ("wake_latency", "external_wake_latency"):
+    if scenario == "batch_external_wake_latency":
+        overlapping = raw.get("wakes_started_before_submission_returned")
+        if type(overlapping) is not int or not 0 < overlapping <= tasks:
+            return "no verified overlap of submission and external wakes"
+    if scenario in ("wake_latency", "external_wake_latency", "batch_external_wake_latency"):
         values = raw.get("latency_samples_ns")
         if not isinstance(values, list) or len(values) != min(tasks, latency_samples) or not all(finite_number(v) and v >= 0 for v in values):
             return "invalid raw latency samples"
         expected = quantile(values, 0.99)
-        metric = "wake_p99_ns" if scenario == "wake_latency" else "external_wake_p99_ns"
+        metric = scenario.removesuffix("_latency") + "_p99_ns"
         actual = raw["metrics"].get(metric)
         if not finite_number(actual) or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-6):
             return "P99 disagrees with raw latency samples"
@@ -418,6 +423,19 @@ def self_test():
                 self.assertIsNone(validate_sample(sample, *args))
                 sample["metrics"][metric] = 10
                 self.assertIsNotNone(validate_sample(sample, *args))
+        def test_mixed_latency_requires_observed_overlap(self):
+            scenario = "batch_external_wake_latency"
+            sample = {"schema_version": 1, "engine": "zrun", "scenario": scenario, "tasks": 2,
+                      "workers": 4, "status": "ok", "correctness": True, "active_tasks": 0,
+                      "completed_tasks": 2, "checksum": 1,
+                      "config": {"yields": 16, "latency_samples": 10, "hold_ms": 20}, "build": {},
+                      "latency_samples_ns": [100, 200], "metrics": {"batch_external_wake_p99_ns": 199.0}}
+            args = ("zrun", scenario, 2, 4, 16, 10, 20)
+            for overlapping in (None, 0, -1, 3, True):
+                sample["wakes_started_before_submission_returned"] = overlapping
+                self.assertIsNotNone(validate_sample(sample, *args))
+            sample["wakes_started_before_submission_returned"] = 1
+            self.assertIsNone(validate_sample(sample, *args))
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(StatisticsTests))
     return 0 if result.wasSuccessful() else 1
 
@@ -445,6 +463,8 @@ def main():
         parser.error("--binary and --output are required")
     if not 1 <= args.rounds <= 1000 or not 100 <= args.bootstrap <= 100000:
         parser.error("rounds must be 1..1000 and bootstrap 100..100000")
+    if "batch_external_wake_latency" in args.scenarios and 1 in args.workers:
+        parser.error("batch_external_wake_latency requires at least two workers")
     if not (0 if set(args.scenarios) == {"batch_join"} else 1) <= args.yields <= 10000 or not 1 <= args.latency_samples <= 100000 or not 0 <= args.hold_ms <= 10000:
         parser.error("scenario arguments outside supported bounds")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 86400:

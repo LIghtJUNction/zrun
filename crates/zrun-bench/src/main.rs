@@ -43,7 +43,7 @@ impl Config {
         while let Some(key) = args.next() {
             if key == "--help" {
                 println!(
-                    "zrun-bench --engine zrun|tokio --scenario spawn_join|batch_join|yield|wake_latency|external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|batch_join|yield|wake_latency|external_wake_latency|batch_external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
                 );
                 std::process::exit(0);
             }
@@ -78,6 +78,7 @@ impl Config {
             "yield",
             "wake_latency",
             "external_wake_latency",
+            "batch_external_wake_latency",
             "pending_memory",
             "idle",
             "soak",
@@ -95,6 +96,9 @@ impl Config {
             || !(1..=60_000).contains(&c.sample_interval_ms)
         {
             return Err("configuration outside documented bounds".into());
+        }
+        if c.scenario == "batch_external_wake_latency" && c.workers == 1 {
+            return Err("batch_external_wake_latency requires at least two workers".into());
         }
         if c.scenario == "soak" && !c.duration_secs.is_some_and(|s| (1..=604800).contains(&s)) {
             return Err("soak requires explicit --duration-secs in 1..604800".into());
@@ -390,6 +394,43 @@ fn external_wake_samples<E: Engine>(
     samples
 }
 
+fn batch_external_wake_samples<E: Engine>(
+    runtime: &mut E,
+    tasks: usize,
+    count: usize,
+) -> Result<(Vec<u64>, usize), String> {
+    let (register, ready) = mpsc::channel::<WakeRegistration>();
+    let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producer_submitted = submitted.clone();
+    let producer = std::thread::Builder::new()
+        .name("external-wake".into())
+        .spawn(move || {
+            let mut overlapping = 0;
+            for _ in 0..tasks {
+                let entry = ready.recv().map_err(|error| error.to_string())?;
+                let start = entry.sampled.then(Instant::now);
+                entry.signal.set(start).expect("one external wake per task");
+                overlapping += usize::from(!producer_submitted.load(Ordering::Acquire));
+                entry.waker.wake();
+            }
+            Ok::<_, String>(overlapping)
+        })
+        .map_err(|error| error.to_string())?;
+    let handles = runtime.spawn_batch((0..tasks).map(|index| ExternalWake {
+        index,
+        sampled: index * count / tasks != (index + 1) * count / tasks,
+        signal: Arc::new(OnceLock::new()),
+        register: Some(register.clone()),
+    }));
+    submitted.store(true, Ordering::Release);
+    drop(register);
+    let samples = join_wake_samples(runtime, handles?, count);
+    let overlapping = producer
+        .join()
+        .map_err(|_| "external wake producer panicked")??;
+    Ok((samples?, overlapping))
+}
+
 fn join_wake_samples<E: Engine>(
     runtime: &mut E,
     handles: Vec<E::Handle<WakeSample>>,
@@ -674,9 +715,13 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
                 "yield_process_cpu_ns": cpu_ns,
                 "yield_cpu_ns_per_wake": cpu_ns.map(|time| time as f64 / ops as f64)});
         }
-        "wake_latency" | "external_wake_latency" => {
+        "wake_latency" | "external_wake_latency" | "batch_external_wake_latency" => {
             let count = c.tasks.min(c.latency_samples);
-            let (mut samples, prefix) = if c.scenario == "external_wake_latency" {
+            let (mut samples, prefix) = if c.scenario == "batch_external_wake_latency" {
+                let (samples, overlapping) = batch_external_wake_samples(&mut rt, c.tasks, count)?;
+                result["wakes_started_before_submission_returned"] = json!(overlapping);
+                (samples, "batch_external_wake")
+            } else if c.scenario == "external_wake_latency" {
                 (
                     external_wake_samples(&mut rt, c.tasks, count)?,
                     "external_wake",

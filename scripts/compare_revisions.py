@@ -91,6 +91,8 @@ def main():
         parser.error("rounds must be 1..1000 and bootstrap 100..100000")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 86400:
         parser.error("timeout must be finite and in (0,86400]")
+    if "batch_external_wake_latency" in args.scenarios and args.workers == 1:
+        parser.error("batch_external_wake_latency requires at least two workers")
     if not (0 if set(args.scenarios) == {"batch_join"} else 1) <= args.yields <= 10000:
         parser.error("yields must be 1..10000, or zero for batch_join alone")
     args.tasks = list(dict.fromkeys(args.tasks))
