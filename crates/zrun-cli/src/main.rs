@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 #[cfg(target_os = "linux")]
+mod ai;
+#[cfg(target_os = "linux")]
 mod bytes;
 #[cfg(target_os = "linux")]
 mod execution;
@@ -39,6 +41,7 @@ const HELP: &str = "Usage:
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
   zrun batch [--ready]            Run JSONL commands, optionally emit ready remote batches
+  zrun ai [config|connect|run|compact]  Connect an AI client or summarize output
   zrun mcp [--stdio | --http ADDRESS [--unix [PATH]] | --unix [PATH]]
   zrun --zmem CLASS [COMMAND...]  Run zrun and its child commands in one zmem scope
   zrun --help
@@ -222,6 +225,8 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             #[cfg(not(target_os = "linux"))]
             Err("zmem integration requires Linux".into())
         }
+        #[cfg(target_os = "linux")]
+        Some("ai") => ai::run(args),
         Some("mcp") => {
             #[cfg(target_os = "linux")]
             mcp::serve(shell()?, args)?;
@@ -301,7 +306,7 @@ fn is_source_file(arg: &OsStr) -> bool {
     if is_script_operand(arg) {
         return true;
     }
-    if matches!(arg.to_str(), Some("run" | "batch" | "mcp")) {
+    if matches!(arg.to_str(), Some("run" | "batch" | "mcp" | "ai")) {
         return false;
     }
     let path = std::path::Path::new(arg);

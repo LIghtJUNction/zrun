@@ -369,7 +369,13 @@ fn pipeline(
             return Err(error("expected an executable in pipeline"));
         };
         // PATH lookup follows the session's exported environment, even after cd and export.
-        let mut cmd = Command::new(name);
+        let mut cmd = if name == "ai" && words.get(n).is_some_and(|first| first == "ai") {
+            let mut this = Command::new(std::env::current_exe()?);
+            this.arg("ai");
+            this
+        } else {
+            Command::new(name)
+        };
         cmd.args(rest)
             .current_dir(&state.cwd)
             .env_clear()

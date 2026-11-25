@@ -139,3 +139,16 @@ Unix socket 和 TCP 的 HTTP/1.1 客户端可以发送 `Connection: keep-alive`�
 Linux 回环验证使用同一 release 二进制、四 worker 的 broker 和固定 CPU 的客户端，交替执行 12 对独立的 512 条 `tools/list` 请求。每条请求校验 HTTP 状态、响应 ID 和工具列表。显式复用时建立 8 条连接，逐条关闭时建立 512 条。耗时中位数分别为 65.5 ms 和 83.7 ms，配对比值为 0.783，95% 区间为 [0.761, 0.802]。该测试只覆盖顺序协议请求，不包含命令执行时间。
 
 在四 worker 的 Linux Unix socket broker 上，用同一 release 二进制交替测试 12 对批处理。每批输入 96 条命令，请求窗口为 2。首条命令等待 150 ms，其余命令各等待 3 ms。所有输出、退出码和原始下标均已校验。`--ready` 将首条结果中位数从 154.1 ms 降到 10.8 ms，比值为 0.070 [0.059, 0.076]。整批从 172.2 ms 降到 154.1 ms，比值为 0.895 [0.892, 0.899]。区间来自 5,000 次配对 bootstrap。结果适用于该快慢混合负载。
+
+## 原生 AI 连接与输出
+
+在终端输入 `ai config`，或直接运行 `zrun ai config`，可得到 MCP 客户端的配置。客户端按配置启动 `zrun ai connect --stdio`，通过标准输入与输出连接一个 zrun 执行器。在同一台机器上，也可以通过已有的私有 Unix socket 或带认证的 loopback HTTP 接口连接。命令仍遵循执行器的权限、超时和输出限制。
+
+`shell_run_compact` 与 `shell_run` 接受相同的命令参数。前者分别压缩 stdout 与 stderr 的连续重复行，并给长文本及二进制数据返回有界预览。退出码、执行错误、实际捕获的字节数、截断标记和摘要可直接读取。使用返回的 `output_id` 调用 `output_read`，指定 `stream` 和字节 `cursor`，可以逐页取回已捕获的原始字节。句柄属于当前服务与授权入口，保留 5 分钟，容量为 64 项。
+
+终端中可用 `zrun ai run '命令'` 获取同样的精简视图；`--save 新目录` 将本次捕获的两个原始输出流分别保存为 `stdout` 和 `stderr`。已有日志可经管道交给 `zrun ai compact`，单次输入最多 16 MiB。以下命令只执行一次任务。
+
+```sh
+zrun ai run --save ./run-output 'printf "ready\nready\nready\n"'
+zrun ai compact < ./run-output/stdout
+```
