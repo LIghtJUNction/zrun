@@ -35,6 +35,8 @@ mod valkey;
 
 const HELP: &str = "Usage:
   zrun                            Enter the native Linux terminal shell
+  zrun --zsh [ARGS...]            Run the installed Zsh with its own rc, syntax and plugins
+  zrun --rc-path                 Print the native interactive startup file path
   zrun --shell [ARGS...]          Enter the configured compatibility shell
   zrun COMMAND [ARGS...]          Execute a program with literal arguments
   zrun FILE [ARGS...]             Run a native script or its declared interpreter
@@ -71,6 +73,8 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let mut args = argv.peekable();
     let first = args.next();
     #[cfg(target_os = "linux")]
+    let mut interactive_rc = false;
+    #[cfg(target_os = "linux")]
     let first = {
         let mut operand = first;
         while matches!(
@@ -78,12 +82,18 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             Some("-l" | "--login" | "-i" | "-li" | "-il")
         ) && args.peek().is_some()
         {
+            interactive_rc |= operand
+                .as_deref()
+                .is_some_and(|v| v.as_encoded_bytes().contains(&b'i'));
             operand = args.next();
         }
         if matches!(
             operand.as_deref().and_then(OsStr::to_str),
             Some("-lc" | "-ic" | "-lic" | "-ilc")
         ) {
+            interactive_rc |= operand
+                .as_deref()
+                .is_some_and(|v| v.as_encoded_bytes().contains(&b'i'));
             Some("-c".into())
         } else {
             operand
@@ -136,6 +146,11 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             command.arg(path).args(args);
             return enter_shell(command);
         }
+        if path.extension() == Some(OsStr::new("zsh")) {
+            let mut zsh = Command::new("zsh");
+            zsh.arg(path).args(args);
+            return enter_shell(zsh);
+        }
         file.rewind()?;
         let positional = std::iter::once(path.as_os_str().to_owned())
             .chain(args)
@@ -165,6 +180,22 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             .collect();
         return Ok(native::source(io::stdin().lock(), positional)?);
     }
+    #[cfg(target_os = "linux")]
+    if first.as_deref() == Some(OsStr::new("--rc-path")) && args.peek().is_none() {
+        println!(
+            "{}",
+            native::rc::path()
+                .ok_or("set HOME or XDG_CONFIG_HOME to an absolute path")?
+                .display()
+        );
+        return Ok(0);
+    }
+    #[cfg(unix)]
+    if first.as_deref() == Some(OsStr::new("--zsh")) {
+        let mut command = Command::new("zsh");
+        command.args(args);
+        return enter_shell(command);
+    }
     if first.as_deref() == Some(OsStr::new("--shell")) {
         let mut command = Command::new(shell()?);
         #[cfg(unix)]
@@ -185,7 +216,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     if first.as_deref() == Some(OsStr::new("-c")) {
         let script = args.next().ok_or("-c needs a command")?;
-        return Ok(native::command(&script, args.collect())?);
+        return Ok(native::command(&script, args.collect(), interactive_rc)?);
     }
     match first.as_deref().and_then(OsStr::to_str) {
         Some("--help" | "-h") => {

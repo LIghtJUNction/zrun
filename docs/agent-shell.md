@@ -152,3 +152,16 @@ Linux 回环验证使用同一 release 二进制、四 worker 的 broker 和固�
 zrun ai run --save ./run-output 'printf "ready\nready\nready\n"'
 zrun ai compact < ./run-output/stdout
 ```
+
+### Interactive startup and existing Zsh configurations
+
+Run `zrun --rc-path` to find the native interactive startup file. On Linux it defaults to `~/.config/zrun/zrunrc`, or `$XDG_CONFIG_HOME/zrun/zrunrc` for an absolute XDG configuration directory. Put native commands in this file, one line at a time. For example:
+
+```sh
+export EDITOR=vim
+alias gs='git status --short'
+```
+
+Opening an interactive native shell reads this file once. `zrun -ic 'gs'` explicitly loads it before evaluating a command. Plain `zrun -c`, batch jobs, and MCP execution skip interactive startup. Set `ZRUN_NO_RC=1` to open a clean native session. `alias` defines a simple command with fixed initial arguments; `unalias NAME` removes it.
+
+`zrun --zsh` starts the installed Zsh. Zsh loads its own startup files, reads `ZDOTDIR`, and runs its native plugins, ZLE widgets and completion system. `zrun --zsh -ic '…'` selects this interpreter explicitly. A `.zsh` file without a shebang also uses Zsh; an explicit shebang selects its named interpreter. Inside the native shell, `zsh-call NAME ARGS…` invokes one command, alias or function from the interactive Zsh configuration. Arguments retain their original boundaries. Each bridge call starts a new Zsh process, so for persistent Zsh-local state use `zrun --zsh`.

@@ -5,6 +5,7 @@ mod execute;
 mod highlight;
 mod history;
 mod prompt;
+pub(crate) mod rc;
 mod syntax;
 mod tasks;
 use execute::{Control, State, Streams};
@@ -183,6 +184,10 @@ impl Session {
 }
 pub(super) fn interactive() -> io::Result<u8> {
     let mut session = Session::new(vec![])?;
+    session.startup();
+    if let Some(code) = session.state.exit {
+        return Ok(code);
+    }
     let signal = Interrupt::new()?;
     let mut history = history::History::load();
     loop {
@@ -210,11 +215,17 @@ pub(super) fn interactive() -> io::Result<u8> {
         }
     }
 }
-pub(super) fn command(script: &OsStr, args: Vec<OsString>) -> io::Result<u8> {
+pub(super) fn command(script: &OsStr, args: Vec<OsString>, interactive_rc: bool) -> io::Result<u8> {
     let script = script
         .to_str()
         .ok_or_else(|| error("native command is not UTF-8"))?;
     let mut session = Session::new(args)?;
+    if interactive_rc {
+        session.startup();
+        if let Some(code) = session.state.exit {
+            return Ok(code);
+        }
+    }
     for line in script.lines() {
         session.line(line, io::stdin().is_terminal(), None)?;
         if let Some(exit) = session.state.exit {

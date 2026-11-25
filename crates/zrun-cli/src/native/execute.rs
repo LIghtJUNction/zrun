@@ -21,6 +21,7 @@ pub(super) struct State {
     pub cwd: PathBuf,
     pub env: BTreeMap<OsString, OsString>,
     locals: BTreeMap<String, String>,
+    pub(super) aliases: BTreeMap<String, Vec<Word>>,
     pub status: u8,
     pub exit: Option<u8>,
     pub positional: Vec<OsString>,
@@ -35,6 +36,7 @@ impl State {
             cwd,
             env,
             locals: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             status: 0,
             exit: None,
             positional: vec!["zrun".into()],
@@ -124,6 +126,39 @@ impl State {
             }
             "pwd" => {
                 writeln!(out, "{}", self.cwd.display())?;
+                0
+            }
+            "alias" => {
+                for arg in args {
+                    let (key, body) = arg
+                        .split_once('=')
+                        .ok_or_else(|| error("alias NAME=COMMAND"))?;
+                    if key.is_empty()
+                        || key.starts_with('-')
+                        || !key
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || "_+.-".contains(c))
+                    {
+                        return Err(error("invalid alias name"));
+                    }
+                    let program = syntax::parse(body)?;
+                    let [(Link::Always, pipeline)] = program.as_slice() else {
+                        return Err(error("alias needs one command"));
+                    };
+                    let [command] = pipeline.as_slice() else {
+                        return Err(error("alias needs one command"));
+                    };
+                    if command.words.is_empty() || !command.redirects.is_empty() {
+                        return Err(error("alias needs a simple command"));
+                    }
+                    self.aliases.insert(key.into(), command.words.clone());
+                }
+                0
+            }
+            "unalias" => {
+                for name in args {
+                    self.aliases.remove(name);
+                }
                 0
             }
             "export" | "unset" => {
@@ -345,7 +380,22 @@ fn pipeline(
         let assignments = words[..n]
             .iter()
             .map(|w| w.split_once('=').expect("validated assignment"));
+        // Explicit command/exec bypass aliases. Alias words are expanded in this
+        // session and the caller's remaining argv retain their original boundaries.
+        let expansion;
         let mut args = &words[n..];
+        if let Some((name, rest)) = args.split_first()
+            && name != "command"
+            && name != "exec"
+            && let Some(definition) = state.aliases.get(name)
+        {
+            expansion = definition
+                .iter()
+                .map(|w| state.word(w))
+                .chain(rest.iter().cloned())
+                .collect::<Vec<_>>();
+            args = &expansion;
+        }
         let replaces_shell = args.first().is_some_and(|s| s == "exec");
         if args.first().is_some_and(|s| s == "exec" || s == "command") {
             args = &args[1..];
@@ -369,14 +419,41 @@ fn pipeline(
             return Err(error("expected an executable in pipeline"));
         };
         // PATH lookup follows the session's exported environment, even after cd and export.
-        let mut cmd = if name == "ai" && words.get(n).is_some_and(|first| first == "ai") {
+        let mut forwarded = rest;
+        let mut cmd = if name == "zsh-call"
+            && words
+                .get(n)
+                .is_some_and(|first| first != "command" && first != "exec")
+        {
+            let (target, args) = rest
+                .split_first()
+                .ok_or_else(|| error("zsh-call needs a command name"))?;
+            if target.is_empty()
+                || target.starts_with('-')
+                || !target
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_+.-".contains(&b))
+            {
+                return Err(error("invalid zsh command name"));
+            }
+            // Zsh expands aliases while parsing. Only the validated name is in
+            // that source text. Each external argument travels separately in argv.
+            let mut zsh = Command::new("zsh");
+            zsh.args(["-ic", &format!("{target} \"$@\""), "zrun-zsh-call"]);
+            forwarded = args;
+            zsh
+        } else if name == "ai"
+            && words
+                .get(n)
+                .is_some_and(|first| first != "command" && first != "exec")
+        {
             let mut this = Command::new(std::env::current_exe()?);
             this.arg("ai");
             this
         } else {
             Command::new(name)
         };
-        cmd.args(rest)
+        cmd.args(forwarded)
             .current_dir(&state.cwd)
             .env_clear()
             .envs(&state.env)
