@@ -31,6 +31,7 @@ mod valkey;
 
 const HELP: &str = "Usage:
   zrun [shell arguments...]       Enter the configured terminal shell
+  zrun COMMAND [ARGS...]        Execute a program with literal arguments
   zrun FILE.zrun [ARGS...]        Run a shell file or a # zrun:1 async program
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
@@ -172,6 +173,18 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             }
             managed(shell()?, None, ready_order)
         }
+        #[cfg(target_os = "linux")]
+        _ if first.as_deref().is_some_and(is_program_operand) => {
+            use std::os::unix::process::CommandExt;
+            let name = first.expect("program operand");
+            let error = Command::new(&name).args(args).exec();
+            eprintln!("zrun: {}: {error}", name.to_string_lossy());
+            Ok(if error.kind() == io::ErrorKind::NotFound {
+                127
+            } else {
+                126
+            })
+        }
         _ => {
             let interactive = first.is_none() && io::stdin().is_terminal();
             let backend = shell()?;
@@ -196,6 +209,24 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             }
             enter_shell(command)
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_program_operand(arg: &OsStr) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    if arg.as_encoded_bytes().starts_with(b"-") || is_script_operand(arg) {
+        return false;
+    }
+    let path = std::path::Path::new(arg);
+    match path.metadata() {
+        // Preserve the existing backend-shell route for a named script in the
+        // current directory. An explicit executable path runs directly.
+        Ok(m) if m.is_file() => {
+            arg.as_encoded_bytes().contains(&b'/') && m.permissions().mode() & 0o111 != 0
+        }
+        _ => true,
     }
 }
 

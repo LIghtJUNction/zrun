@@ -1159,3 +1159,36 @@ fn tcp_mcp_keep_alive_rechecks_authentication_and_bounds_requests() {
     }
     assert!(reader.fill_buf().unwrap().is_empty());
 }
+
+#[test]
+fn program_arguments_are_literal_and_files_still_run_as_scripts() {
+    let dir = Directory::new();
+    let file = dir.0.join("with space");
+    fs::write(&file, "printf '%s' \"$1\"\n").unwrap();
+    let name = "with space";
+    let listed = zrun()
+        .current_dir(&dir.0)
+        .args(["ls", name])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert_eq!(listed.stdout, b"with space\n");
+    let literal = "$(printf executed); *";
+    for path in ["printf", "/usr/bin/printf"] {
+        let printed = zrun().args([path, "%s", literal]).output().unwrap();
+        assert!(printed.status.success());
+        assert_eq!(printed.stdout, literal.as_bytes());
+    }
+    let script = zrun()
+        .current_dir(&dir.0)
+        .args([name, literal])
+        .output()
+        .unwrap();
+    assert!(script.status.success());
+    assert_eq!(script.stdout, literal.as_bytes());
+    let missing = zrun()
+        .arg("zrun-test-missing-command-32f9")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(127));
+}
