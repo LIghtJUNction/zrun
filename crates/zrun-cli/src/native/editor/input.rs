@@ -57,6 +57,8 @@ pub(super) enum Key {
     Cancel,
     Eof,
     Ignore,
+    Escape,
+    BackTab,
     TooLong,
 }
 enum Input {
@@ -142,8 +144,9 @@ impl Reader<'_> {
                 Input::Byte(b'[' | b'O') => (),
                 Input::Byte(other) => {
                     self.pending = Some(other);
-                    return Ok(Key::Ignore);
+                    return Ok(Key::Escape);
                 }
+                Input::Timeout => return Ok(Key::Escape),
                 other => return Ok(other.key()),
             }
             let mut seq = Vec::new();
@@ -156,6 +159,8 @@ impl Reader<'_> {
                 if (0x40..=0x7e).contains(&b) {
                     return if seq == b"200~" {
                         self.paste(room)
+                    } else if seq == b"Z" {
+                        Ok(Key::BackTab)
                     } else {
                         Ok(Key::Sequence(seq))
                     };

@@ -1,7 +1,9 @@
 //! An interactive edit owns the terminal only while collecting one command.
 mod input;
+mod menu;
 use super::{Interrupt, Line, State, complete, highlight, history::History, prompt};
 use input::{Key, Mode, Reader};
+use menu::{Menu, Panel};
 use std::{
     ffi::OsStr,
     io::{self, IsTerminal, Write},
@@ -93,6 +95,8 @@ struct Screen {
     color: bool,
     echo: bool,
     columns: usize,
+    rows: usize,
+    panel: Panel,
     prompt_width: usize,
     paste_enabled: bool,
 }
@@ -113,6 +117,8 @@ impl Screen {
             color,
             echo,
             columns: 80,
+            rows: 24,
+            panel: Panel::default(),
             prompt_width,
             paste_enabled: false,
         }
@@ -146,19 +152,34 @@ impl Screen {
         state: &State,
         edit: &Buffer,
         history: Option<&History>,
+        menu: Option<&Menu>,
     ) -> io::Result<()> {
         if !self.echo {
             return Ok(());
         }
         let mut size = libc::winsize::default();
         // SAFETY: TIOCGWINSZ writes one winsize into the borrowed storage.
-        if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut size) } == 0
-            && size.ws_col > 0
-            && self.columns != usize::from(size.ws_col)
-        {
-            self.columns = usize::from(size.ws_col);
-            self.prompt = prompt::current(state);
-            self.prompt_width = visible_prompt_width(&self.prompt);
+        if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut size) } == 0 {
+            if size.ws_row > 0 {
+                self.rows = usize::from(size.ws_row);
+            }
+            if size.ws_col > 0 && self.columns != usize::from(size.ws_col) {
+                self.columns = usize::from(size.ws_col);
+                self.prompt = prompt::current(state);
+                self.prompt_width = visible_prompt_width(&self.prompt);
+            }
+        }
+        let mut out = io::stderr().lock();
+        self.panel.draw(
+            &mut out,
+            menu,
+            self.columns,
+            self.rows,
+            self.ansi,
+            self.color,
+        )?;
+        if menu.is_some() && (!self.ansi || self.rows < 2) {
+            return out.flush();
         }
         // A one-row scrolling viewport avoids cursor drift at wraps and wide glyphs.
         // A UTF-8 byte budget is a conservative cell bound for printable Unicode.
@@ -178,7 +199,6 @@ impl Screen {
         };
         let left = paint(start, edit.cursor);
         let right = paint(edit.cursor, end);
-        let mut out = io::stderr().lock();
         if self.ansi {
             write!(out, "\r{}{left}", self.prompt)?;
             // Save and restore the terminal's actual cursor; it knows the width of its font.
@@ -204,19 +224,6 @@ impl Screen {
         }
         out.flush()
     }
-    fn choices(&self, candidates: &[String]) -> io::Result<()> {
-        if self.echo && candidates.len() > 1 {
-            let mut out = io::stderr().lock();
-            writeln!(out)?;
-            for name in candidates.iter().take(12) {
-                writeln!(out, "{}", display(name))?;
-            }
-            if candidates.len() > 12 {
-                writeln!(out, "… {} more", candidates.len() - 12)?;
-            }
-        }
-        Ok(())
-    }
 }
 impl Drop for Screen {
     fn drop(&mut self) {
@@ -241,14 +248,55 @@ pub(super) fn read_line(
     screen.begin()?;
     let mut edit = Buffer::default();
     let mut too_long = false;
+    let mut menu: Option<Menu> = None;
     let result = loop {
         let room = crate::execution::Batch::MAX_INPUT - edit.line.len();
         let key = keys.key(room)?;
+        if let Some(active) = &mut menu {
+            match menu::action(&key) {
+                menu::Action::Cycle(forward) => {
+                    active.step(forward);
+                    screen.redraw(state, &edit, None, menu.as_ref())?;
+                    continue;
+                }
+                menu::Action::Cancel => {
+                    menu.take().unwrap().cancel(&mut edit);
+                    screen.redraw(state, &edit, Some(history), None)?;
+                    continue;
+                }
+                menu::Action::Commit => {
+                    if active.has_choice() && !active.accept(&mut edit) {
+                        continue;
+                    }
+                    menu = None;
+                    screen.redraw(state, &edit, None, None)?;
+                    // Enter accepts the candidate and submits the complete command below.
+                }
+                menu::Action::Accept => {
+                    let accepted = active.accept(&mut edit);
+                    if accepted && edit.line[edit.cursor..].starts_with([' ', '\t']) {
+                        edit.cursor = edit.next();
+                    }
+                    menu = None;
+                    screen.redraw(state, &edit, Some(history), None)?;
+                    if accepted {
+                        continue;
+                    }
+                }
+                menu::Action::Filter => (),
+                menu::Action::Dismiss => {
+                    menu = None;
+                    screen.redraw(state, &edit, None, None)?;
+                }
+            }
+        }
         if !too_long
             && (matches!(key, Key::TooLong)
                 || matches!(&key, Key::Text(t) if t.len() > room)
                 || (room == 0 && matches!(key, Key::Byte(b' '..=b'~'))))
         {
+            menu = None;
+            screen.redraw(state, &edit, None, None)?;
             writeln!(
                 io::stderr(),
                 "\nzrun: input limit exceeded; discard this command with Enter or Ctrl-C"
@@ -267,24 +315,37 @@ pub(super) fn read_line(
                 writeln!(io::stderr())?;
                 break Line::Cancel;
             }
-            Key::Eof | Key::Byte(4) if edit.line.is_empty() => break Line::Eof,
+            Key::Eof | Key::Byte(4) if edit.line.is_empty() => {
+                if menu.take().is_some() {
+                    screen.redraw(state, &edit, None, None)?;
+                }
+                break Line::Eof;
+            }
             Key::Eof | Key::Byte(b'\n' | b'\r') => {
                 if screen.echo {
                     if edit.cursor != edit.line.len() || screen.suggestion(&edit, history).is_some()
                     {
                         edit.cursor = edit.line.len();
-                        screen.redraw(state, &edit, None)?;
+                        screen.redraw(state, &edit, None, None)?;
                     }
                     writeln!(io::stderr())?;
                 }
                 break Line::Text(edit.line);
             }
-            Key::Byte(b'\t') => {
+            Key::Byte(b'\t') | Key::BackTab => {
                 let result = complete::complete(state, &edit.line, edit.cursor);
+                if screen.echo && result.candidates.len() > 1 {
+                    let mut active = Menu::new(&edit, result.candidates);
+                    if matches!(key, Key::BackTab) {
+                        active.step(false);
+                    }
+                    menu = Some(active);
+                    screen.redraw(state, &edit, None, menu.as_ref())?;
+                    continue;
+                }
                 if let Some((range, text)) = result.replace {
                     edit.replace(range, &text);
                 }
-                screen.choices(&result.candidates)?;
             }
             Key::Byte(8 | 127) => edit.replace(edit.previous()..edit.cursor, ""),
             Key::Byte(4) => edit.replace(edit.cursor..edit.next(), ""),
@@ -325,7 +386,11 @@ pub(super) fn read_line(
             }
             _ => continue,
         }
-        screen.redraw(state, &edit, Some(history))?;
+        if let Some(active) = &mut menu {
+            active.filtered(complete::complete(state, &edit.line, edit.cursor).candidates);
+        }
+        let hint = menu.is_none().then_some(&*history);
+        screen.redraw(state, &edit, hint, menu.as_ref())?;
     };
     screen.finish()?;
     terminal.restore()?;
