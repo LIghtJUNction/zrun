@@ -21,7 +21,7 @@ pub(super) struct Completion {
 
 const BUILTINS: &[&str] = &[
     ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
-    "pwd", "shell", "true", "unalias", "unset",
+    "pwd", "shell", "true", "unalias", "unset", "zsh-call",
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -334,6 +334,11 @@ fn candidates(state: &State, target: &Target<'_>) -> BTreeSet<String> {
         }
         Position::Command if !prefix.contains('/') => {
             add_names(&mut matches, BUILTINS.iter().copied(), prefix);
+            add_names(
+                &mut matches,
+                state.aliases.keys().map(String::as_str),
+                prefix,
+            );
             add_executables(state, prefix, &mut matches);
         }
         pos => add_paths(state, prefix, pos, &mut matches),

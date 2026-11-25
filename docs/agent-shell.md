@@ -165,3 +165,7 @@ alias gs='git status --short'
 Opening an interactive native shell reads this file once. `zrun -ic 'gs'` explicitly loads it before evaluating a command. Plain `zrun -c`, batch jobs, and MCP execution skip interactive startup. Set `ZRUN_NO_RC=1` to open a clean native session. `alias` defines a simple command with fixed initial arguments; `unalias NAME` removes it.
 
 `zrun --zsh` starts the installed Zsh. Zsh loads its own startup files, reads `ZDOTDIR`, and runs its native plugins, ZLE widgets and completion system. `zrun --zsh -ic '…'` selects this interpreter explicitly. A `.zsh` file without a shebang also uses Zsh; an explicit shebang selects its named interpreter. Inside the native shell, `zsh-call NAME ARGS…` invokes one command, alias or function from the interactive Zsh configuration. Arguments retain their original boundaries. Each bridge call starts a new Zsh process, so for persistent Zsh-local state use `zrun --zsh`.
+
+### Completing a command at the terminal
+
+Type `git sta` and press Tab to see matching candidates. Repeated Tab advances, Shift-Tab moves back, and the arrow keys let you choose. Continue typing at any point to filter the original word. Enter accepts the highlighted item and runs the edited command. Right or Space inserts the choice so you can continue adding arguments. Escape restores the line and cursor from before the menu opened. A single match is filled directly. The same editor completes account aliases, executable names, paths and common Git, Cargo, and zrun subcommands.
