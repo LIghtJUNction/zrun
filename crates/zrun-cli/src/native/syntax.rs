@@ -299,7 +299,7 @@ pub(super) fn statements(line: &str) -> Vec<&str> {
         if matches!(c, '\'' | '"') {
             quote = Some(c);
         } else if c == ';' {
-            if line[start..].trim_start().split_whitespace().next() == Some("shell") {
+            if line[start..].split_whitespace().next() == Some("shell") {
                 break;
             }
             result.push(&line[start..i]);
