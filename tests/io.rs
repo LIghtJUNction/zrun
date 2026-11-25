@@ -115,6 +115,60 @@ fn process_exit_notification_preserves_status_for_the_supervisor() {
         .expect("drive process I/O");
 }
 
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn cancelled_process_wait_can_be_rearmed_and_reaps_once() {
+    use std::pin::pin;
+    use std::process::Command;
+    use std::task::{Context, Waker};
+    use std::time::Instant;
+
+    let mut runtime = Runtime::new();
+    let timer = runtime.timer();
+    let mut poller = Poller::new().unwrap();
+    let (input, mut release) = std::io::pipe().unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "read -r line && exit 23"]).stdin(input);
+    let mut child = zrun::process::spawn(&mut command, poller.handle()).unwrap();
+    {
+        let mut first = pin!(child.wait(&timer));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    assert!(child.try_exit().unwrap().is_none());
+
+    runtime
+        .block_on_with_io(&mut poller, async {
+            let mut waiting = pin!(child.wait(&timer));
+            let mut release = Some(&mut release);
+            let status = timer
+                .timeout_at(
+                    Instant::now() + Duration::from_secs(5),
+                    poll_fn(|cx| {
+                        let poll = waiting.as_mut().poll(cx);
+                        if let Some(input) = release.take() {
+                            assert!(poll.is_pending());
+                            input.write_all(b"go\n").unwrap();
+                        }
+                        poll
+                    }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.code(), Some(23));
+        })
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(child.wait(&timer)).unwrap().code(),
+        Some(23)
+    );
+}
+
 #[test]
 fn foreign_admission_interrupts_a_caller_driven_poll() {
     let mut runtime = Runtime::new();

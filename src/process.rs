@@ -6,7 +6,7 @@ use std::process::{
     Child as SystemChild, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus,
 };
 use std::sync::{OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::Timer;
 use crate::io::{AsyncFd, FdInterest, Handle, Nonblocking};
@@ -127,8 +127,14 @@ impl Child {
         if let Some(status) = self.raw_mut().try_wait()? {
             return Ok(status);
         }
-        self.wait_for_exit(timer).await?;
-        self.raw_mut().wait()
+        let child = self.child.as_mut().expect("child is still owned");
+        let pid = process_id(child)?;
+        wait_for_status(pid, &self.io, timer, || {
+            child
+                .try_wait()?
+                .ok_or_else(|| io::ErrorKind::WouldBlock.into())
+        })
+        .await
     }
 }
 
@@ -167,13 +173,23 @@ fn reap_on_exit(child: SystemChild) {
 fn reap_children(receiver: mpsc::Receiver<SystemChild>) {
     let mut pending = Vec::new();
     loop {
-        let next = if pending.is_empty() {
+        if pending.is_empty() {
             let Ok(child) = receiver.recv() else { return };
-            Some(child)
-        } else {
-            receiver.recv_timeout(PORTABLE_WAIT_INTERVAL).ok()
-        };
-        pending.extend(next);
+            pending.push(child);
+        }
+
+        // New arrivals join this sweep without advancing or postponing it.
+        let sweep_at = Instant::now() + PORTABLE_WAIT_INTERVAL;
+        while let Some(remaining) = sweep_at.checked_duration_since(Instant::now()) {
+            match receiver.recv_timeout(remaining) {
+                Ok(child) => pending.push(child),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(remaining);
+                    break;
+                }
+            }
+        }
         pending.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
     }
 }
@@ -197,17 +213,25 @@ pub async fn wait_for_exit(
     timer: &Timer,
 ) -> io::Result<ExitStatus> {
     let pid = process_id(child)?;
+    wait_for_status(pid, io, timer, || observe_exit(pid)).await
+}
 
+async fn wait_for_status(
+    pid: libc::pid_t,
+    io: &Handle,
+    timer: &Timer,
+    mut status: impl FnMut() -> io::Result<ExitStatus>,
+) -> io::Result<ExitStatus> {
     #[cfg(target_os = "linux")]
     if let Some(mut ready) = register_exit(pid, io)? {
-        return ready.readable(|_| observe_exit(pid)).await;
+        return ready.readable(|_| status()).await;
     }
 
     #[cfg(not(target_os = "linux"))]
-    let _ = io;
+    let _ = (pid, io);
 
     loop {
-        match observe_exit(pid) {
+        match status() {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 timer
                     .sleep(PORTABLE_WAIT_INTERVAL)
@@ -266,4 +290,61 @@ fn observe_exit(pid: libc::pid_t) -> io::Result<ExitStatus> {
         _ => return Err(io::Error::other("child exit status unavailable")),
     };
     Ok(ExitStatus::from_raw(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::Poller;
+    use std::process::Stdio;
+
+    #[test]
+    fn reaper_drains_a_burst_of_detached_children_after_they_exit() {
+        let poller = Poller::new().unwrap();
+        let (input, release) = std::io::pipe().unwrap();
+        let mut children = Vec::new();
+        let mut pids = Vec::new();
+        for _ in 0..24 {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "read -r line"])
+                .stdin(input.try_clone().unwrap())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let child = spawn(&mut command, poller.handle()).unwrap();
+            pids.push(process_id(child.raw()).unwrap());
+            children.push(child);
+        }
+        drop(children);
+        for &pid in &pids {
+            assert_eq!(
+                observe_exit(pid).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        drop(release);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pids.is_empty() {
+            // A non-reaping observation returns ECHILD once the shared reaper
+            // has collected this process. The test never consumes its status.
+            pids.retain(|&pid| match observe_exit(pid) {
+                Err(e) if e.raw_os_error() == Some(libc::ECHILD) => false,
+                Ok(_) => true,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    true
+                }
+                Err(e) => panic!("observing child {pid}: {e}"),
+            });
+            assert!(Instant::now() < deadline, "unreaped children: {pids:?}");
+            if !pids.is_empty() {
+                std::thread::sleep(PORTABLE_WAIT_INTERVAL);
+            }
+        }
+    }
 }
