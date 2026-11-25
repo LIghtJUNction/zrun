@@ -1,5 +1,9 @@
 //! Literal completion for unfinished native shell input. Never evaluates a command or expansion.
+mod branches;
+mod commands;
+
 use super::{execute::State, syntax};
+use commands::Group;
 use std::{
     collections::BTreeSet,
     ffi::{CString, OsStr},
@@ -16,8 +20,8 @@ pub(super) struct Completion {
 }
 
 const BUILTINS: &[&str] = &[
-    ":", "async", "await", "cd", "command", "exec", "exit", "export", "false", "pwd", "shell",
-    "true", "unset",
+    ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
+    "pwd", "shell", "true", "unalias", "unset",
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -27,6 +31,9 @@ enum Position {
     Directory,
     AsyncName,
     Marker,
+    Group(Group),
+    GlobalValue(Group, bool),
+    Options(Group, &'static str),
 }
 
 struct Target<'a> {
@@ -80,8 +87,11 @@ fn next_position(previous: Position, raw: &str, value: &str) -> Position {
             {
                 Position::Command
             }
-            _ => Position::Argument,
+            _ => commands::root(value).map_or(Position::Argument, Position::Group),
         },
+        Position::Group(group) => group.after(value),
+        Position::GlobalValue(group, _) => Position::Group(group),
+        Position::Options(_, _) if value == "--" => Position::Argument,
         Position::AsyncName => Position::Marker,
         Position::Marker if value == "--" => Position::Command,
         pos => pos,
@@ -106,6 +116,7 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
     let mut i = 0;
     let mut position = Position::Command;
     let mut redirect = false;
+    let mut other_repo = false;
     while i < line.len() {
         let tail = &line[i..];
         let c = tail.chars().next()?;
@@ -118,6 +129,7 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
             }
             if c == '\n' {
                 position = Position::Command;
+                other_repo = false;
                 redirect = false;
             }
             i += c.len_utf8();
@@ -134,6 +146,7 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
             redirect = is_redirect && !op.contains('&');
             if !is_redirect {
                 position = Position::Command;
+                other_repo = false;
             }
             continue;
         }
@@ -157,7 +170,17 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
         if redirect {
             redirect = false;
         } else {
+            if position == Position::Command
+                && value.split_once('=').is_some_and(|(key, _)| {
+                    matches!(key, "GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
+                })
+            {
+                other_repo = true;
+            }
             position = next_position(position, &line[i..end], &value);
+            if other_repo && position == Position::Group(Group::Git) {
+                position = Position::Group(Group::GitOtherDirectory);
+            }
         }
         i = end;
     }
@@ -204,7 +227,7 @@ fn directory_entries(
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !name.starts_with(prefix)
+        if match_quality(prefix, &name).is_none()
             || (!prefix.starts_with('.') && name.starts_with('.'))
             || !display_safe(&name)
         {
@@ -228,6 +251,43 @@ fn directory_entries(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Quality {
+    Prefix,
+    Substring,
+    Subsequence,
+}
+
+fn match_quality(query: &str, name: &str) -> Option<Quality> {
+    if name.starts_with(query) {
+        return Some(Quality::Prefix);
+    }
+    // A single letter should narrow the menu instead of matching almost all of PATH.
+    let mut chars = query.chars();
+    chars.next()?;
+    chars.next()?;
+    if name.contains(query) {
+        return Some(Quality::Substring);
+    }
+    let mut haystack = name.chars();
+    query
+        .chars()
+        .all(|c| haystack.any(|n| n == c))
+        .then_some(Quality::Subsequence)
+}
+
+fn add_names<'a>(
+    matches: &mut BTreeSet<String>,
+    names: impl Iterator<Item = &'a str>,
+    prefix: &str,
+) {
+    matches.extend(
+        names
+            .filter(|name| match_quality(prefix, name).is_some())
+            .map(str::to_owned),
+    );
+}
+
 fn candidates(state: &State, target: &Target<'_>) -> BTreeSet<String> {
     let mut matches = BTreeSet::new();
     let prefix = target.prefix.as_str();
@@ -235,43 +295,75 @@ fn candidates(state: &State, target: &Target<'_>) -> BTreeSet<String> {
         return matches;
     }
     match target.position {
-        Position::AsyncName => {}
+        Position::Group(group) if !prefix.contains('/') => {
+            let names = if prefix.starts_with('-') {
+                group.flags(None)
+            } else {
+                group.names()
+            };
+            add_names(&mut matches, names.split_ascii_whitespace(), prefix);
+            if group == Group::Zrun
+                && !prefix.is_empty()
+                && !prefix.starts_with('-')
+                && !matches.iter().any(|name| name.starts_with(prefix))
+            {
+                add_executables(state, prefix, &mut matches);
+            }
+        }
+        Position::Options(group, leaf) if prefix.starts_with('-') => {
+            add_names(
+                &mut matches,
+                group.flags(Some(leaf)).split_ascii_whitespace(),
+                prefix,
+            );
+        }
+        Position::Options(Group::Git, "switch" | "checkout" | "merge" | "rebase" | "branch") => {
+            branches::local(state, prefix, &mut matches);
+            if matches!(target.position, Position::Options(_, "checkout")) {
+                add_paths(state, prefix, Position::Argument, &mut matches);
+            }
+        }
+        Position::GlobalValue(_, true) => {
+            add_paths(state, prefix, Position::Directory, &mut matches)
+        }
+        Position::GlobalValue(_, false) | Position::AsyncName => {}
         Position::Marker => {
             if "--".starts_with(prefix) {
                 matches.insert("--".to_string());
             }
         }
         Position::Command if !prefix.contains('/') => {
-            matches.extend(
-                BUILTINS
-                    .iter()
-                    .filter(|name| name.starts_with(prefix))
-                    .map(|&s| s.to_owned()),
-            );
-            if let Some(path) = state.env.get(OsStr::new("PATH")) {
-                let mut seen = BTreeSet::<PathBuf>::new();
-                for entry in std::env::split_paths(path) {
-                    let dir = state.cwd.join(entry);
-                    if seen.insert(dir.clone()) {
-                        directory_entries(&dir, "", prefix, Position::Command, true, &mut matches);
-                    }
-                }
-            }
+            add_names(&mut matches, BUILTINS.iter().copied(), prefix);
+            add_executables(state, prefix, &mut matches);
         }
-        pos => {
-            let split = prefix.rfind('/').map_or(0, |n| n + 1);
-            let (parent, basename) = prefix.split_at(split);
-            directory_entries(
-                &state.cwd.join(parent),
-                parent,
-                basename,
-                pos,
-                false,
-                &mut matches,
-            );
-        }
+        pos => add_paths(state, prefix, pos, &mut matches),
     }
     matches
+}
+
+fn add_executables(state: &State, prefix: &str, matches: &mut BTreeSet<String>) {
+    if let Some(path) = state.env.get(OsStr::new("PATH")) {
+        let mut seen = BTreeSet::<PathBuf>::new();
+        for entry in std::env::split_paths(path) {
+            let dir = state.cwd.join(entry);
+            if seen.insert(dir.clone()) {
+                directory_entries(&dir, "", prefix, Position::Command, true, matches);
+            }
+        }
+    }
+}
+
+fn add_paths(state: &State, prefix: &str, pos: Position, matches: &mut BTreeSet<String>) {
+    let split = prefix.rfind('/').map_or(0, |n| n + 1);
+    let (parent, basename) = prefix.split_at(split);
+    directory_entries(
+        &state.cwd.join(parent),
+        parent,
+        basename,
+        pos,
+        false,
+        matches,
+    );
 }
 
 fn quoted(value: &str, original: &str) -> String {
@@ -301,32 +393,60 @@ pub(super) fn complete(state: &State, line: &str, cursor: usize) -> Completion {
     let Some(target) = target(line, cursor) else {
         return Completion::default();
     };
-    let candidates: Vec<_> = candidates(state, &target).into_iter().collect();
-    let Some(first) = candidates.first() else {
+    let mut ranked: Vec<_> = candidates(state, &target)
+        .into_iter()
+        .filter_map(|name| match_quality(&target.prefix, &name).map(|quality| (quality, name)))
+        .collect();
+    // Within each quality the original BTreeSet order is lexical.
+    ranked.sort_by_key(|(quality, _)| *quality);
+    let Some(&(best, _)) = ranked.first() else {
         return Completion::default();
     };
-    // Sorted candidates all share exactly the prefix shared by the first and last.
-    let last = candidates.last().unwrap();
-    let len = first
-        .chars()
-        .zip(last.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum();
-    let unique = candidates.len() == 1;
-    let replace = if unique || len > target.prefix.len() {
-        let mut text = quoted(&first[..len], target.word);
-        if unique && !first.ends_with('/') && target.range.end == line.len() {
-            text.push(' ');
-        }
-        (text != target.word).then_some((target.range, text))
+    let strong = ranked
+        .iter()
+        .take_while(|(quality, _)| *quality == best)
+        .count();
+    if strong == 1 && best == Quality::Prefix {
+        ranked.truncate(1);
+    }
+    let names: Vec<_> = ranked.into_iter().map(|(_, name)| name).collect();
+    let replace = if names.len() == 1 {
+        select_target(&target, line, &names[0])
+    } else if best == Quality::Prefix {
+        let first = &names[0];
+        let len = first
+            .chars()
+            .zip(names[strong - 1].chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(c, _)| c.len_utf8())
+            .sum();
+        (len > target.prefix.len())
+            .then(|| (target.range.clone(), quoted(&first[..len], target.word)))
     } else {
         None
     };
     Completion {
-        replace,
-        candidates,
+        replace: replace.filter(|(_, text)| text != target.word),
+        candidates: names,
     }
+}
+
+// The editor selects only from its original menu. Serializing the candidate through the
+// same word parser/quoting path keeps metacharacters literal and preserves following words.
+pub(super) fn select(line: &str, cursor: usize, name: &str) -> Option<(Range<usize>, String)> {
+    let target = target(line, cursor)?;
+    select_target(&target, line, name)
+}
+
+fn select_target(target: &Target<'_>, line: &str, name: &str) -> Option<(Range<usize>, String)> {
+    if name.is_empty() || !display_safe(name) {
+        return None;
+    }
+    let mut text = quoted(name, target.word);
+    if !name.ends_with('/') && target.range.end == line.len() {
+        text.push(' ');
+    }
+    Some((target.range.clone(), text))
 }
 
 #[cfg(test)]
@@ -492,5 +612,102 @@ mod tests {
                 .any(|s| s.starts_with('.'))
         );
         assert_eq!(f.apply("cat .h", ""), "cat .hidden ");
+    }
+    #[test]
+    fn git_cargo_and_zrun_complete_their_actual_command_positions() {
+        let f = Fixture::new();
+        f.file("status-file", 0o600);
+        for line in [
+            "git sw",
+            "git -C other sw",
+            "git -c color.ui=false sw",
+            "true | /usr/bin/git sw",
+            "command git sw",
+            "async task -- git sw",
+        ] {
+            assert_eq!(f.run(line, "").candidates, ["switch"], "{line}");
+            assert_eq!(
+                f.apply(line, ""),
+                format!("{}switch ", line.strip_suffix("sw").unwrap())
+            );
+        }
+        let matches = f.run("git sta", "").candidates;
+        assert_eq!(&matches[..2], ["stash", "status"]);
+        assert!(!matches.contains(&"status-file".to_string()));
+        assert!(f.run("git status --sho", "").replace.is_none()); // --short and --show-stash share --sho
+        assert_eq!(f.apply("git status --shor", ""), "git status --short ");
+        assert_eq!(f.apply("alia", ""), "alias ");
+        assert_eq!(f.apply("unali", ""), "unalias ");
+        assert_eq!(f.apply("ai", ""), "ai ");
+        assert_eq!(f.apply("cargo bui", ""), "cargo build ");
+        assert_eq!(f.apply("cargo build --rel", ""), "cargo build --release ");
+        assert_eq!(f.apply("zrun ai com", ""), "zrun ai compact ");
+        assert_eq!(
+            f.apply("zrun ai connect --std", ""),
+            "zrun ai connect --stdio "
+        );
+        assert_eq!(f.apply("git add -- sta", ""), "git add -- status-file ");
+        assert_eq!(f.apply("git >sta", ""), "git >status-file ");
+    }
+
+    #[test]
+    fn ranked_file_filter_and_menu_selection_keep_words_literal() {
+        let f = Fixture::new();
+        fs::create_dir(f.root.join("words")).unwrap();
+        f.file("words/multi-a", 0o600);
+        f.file("words/multi-b", 0o600);
+        assert_eq!(f.run("cat words/mub", "").candidates, ["words/multi-b"]);
+        assert_eq!(f.apply("git swt", ""), "git switch ");
+        let name = "long name;$(no)";
+        f.file(name, 0o600);
+        let line = "cat 'lXYZ' tail";
+        let (span, insert) = select(line, 6, name).unwrap();
+        assert_eq!(span, 4..10);
+        let mut line = line.to_owned();
+        line.replace_range(span, &insert);
+        let parsed = syntax::parse(&line).unwrap();
+        assert!(matches!(&parsed[0].1[0].words[1][..],[syntax::Part::Text(s)] if s==name));
+        assert!(matches!(&parsed[0].1[0].words[2][..],[syntax::Part::Text(s)] if s=="tail"));
+        assert!(select("printf $X", 9, name).is_none());
+        assert!(select("cat ", 4, "evil\x1b[2J").is_none());
+    }
+
+    #[test]
+    fn git_completes_only_branch_refs_in_the_current_repository() {
+        let mut f = Fixture::new();
+        let admin = f.root.join(".git");
+        fs::create_dir_all(admin.join("refs/heads/feature")).unwrap();
+        fs::write(admin.join("refs/heads/main"), "").unwrap();
+        fs::write(admin.join("refs/heads/feature/forms"), "").unwrap();
+        fs::write(admin.join("refs/heads/main.lock"), "").unwrap();
+        symlink(&f.root, admin.join("refs/heads/leak")).unwrap();
+        fs::write(
+            admin.join("packed-refs"),
+            format!(
+                "{} refs/heads/maint\n{} refs/remotes/origin/private\n",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+        )
+        .unwrap();
+        let fifo = CString::new(admin.join("refs/heads/pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the fixture owns the new pathname for this FIFO.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        fs::create_dir(f.root.join("sub")).unwrap();
+        f.state.cwd = f.root.join("sub");
+        assert_eq!(f.run("git switch mai", "").candidates, ["main", "maint"]);
+        assert_eq!(f.apply("git switch fea", ""), "git switch feature/forms ");
+        assert_eq!(
+            f.run("git switch ", "").candidates,
+            ["feature/forms", "main", "maint"]
+        );
+        assert!(f.run("git -C /tmp switch mai", "").candidates.is_empty());
+        assert!(
+            f.run("GIT_DIR=/elsewhere git switch mai", "")
+                .candidates
+                .is_empty()
+        );
+        f.state.env.insert("GIT_DIR".into(), "/elsewhere".into());
+        assert!(f.run("git switch mai", "").candidates.is_empty());
     }
 }
