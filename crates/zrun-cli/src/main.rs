@@ -71,7 +71,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         let mut operand = first;
         while matches!(
             operand.as_deref().and_then(OsStr::to_str),
-            Some("-l" | "--login" | "-i")
+            Some("-l" | "--login" | "-i" | "-li" | "-il")
         ) && args.peek().is_some()
         {
             operand = args.next();
@@ -87,26 +87,21 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     };
     #[cfg(target_os = "linux")]
     let first = {
-        let script_operand = if first.as_deref() == Some(OsStr::new("--")) {
-            args.peek().filter(|arg| is_source_file(arg))
-        } else {
-            first.as_ref().filter(|arg| is_source_file(arg))
-        };
-        match script_operand {
-            // Ensure a dash-prefixed filename remains an operand when
-            // passed through to a shell or a shebang interpreter.
-            Some(path) => {
-                let path = if path.as_encoded_bytes().starts_with(b"-") {
-                    std::path::Path::new(".").join(path).into_os_string()
-                } else {
-                    path.clone()
-                };
-                if first.as_deref() == Some(OsStr::new("--")) {
-                    args.next();
-                }
-                Some(path)
+        if first.as_deref() == Some(OsStr::new("--")) {
+            let operand = args.peek().map(|arg| std::path::Path::new(".").join(arg));
+            if let Some(path) = operand.filter(|p| is_source_file(p.as_os_str())) {
+                args.next();
+                Some(path.into_os_string())
+            } else {
+                first
             }
-            None => first,
+        } else if let Some(path) = first
+            .as_deref()
+            .filter(|arg| arg.as_encoded_bytes().starts_with(b"-") && is_script_operand(arg))
+        {
+            Some(std::path::Path::new(".").join(path).into_os_string())
+        } else {
+            first
         }
     };
     #[cfg(target_os = "linux")]
@@ -148,7 +143,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         && (first.is_none()
             || (matches!(
                 first.as_deref().and_then(OsStr::to_str),
-                Some("-i" | "-l" | "--login")
+                Some("-i" | "-l" | "--login" | "-li" | "-il")
             ) && args.peek().is_none()))
     {
         return Ok(native::interactive()?);
@@ -157,7 +152,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     if first.is_none()
         || matches!(
             first.as_deref().and_then(OsStr::to_str),
-            Some("-i" | "-l" | "--login" | "-s")
+            Some("-i" | "-l" | "--login" | "-li" | "-il" | "-s" | "-")
         )
     {
         args.next_if(|arg| arg == "--");
@@ -292,6 +287,9 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 fn is_source_file(arg: &OsStr) -> bool {
+    if arg.as_encoded_bytes().starts_with(b"-") {
+        return false;
+    }
     if is_script_operand(arg) {
         return true;
     }

@@ -4,9 +4,16 @@ use std::process::Command;
 #[test]
 fn native_command_and_async_preserve_arguments_state_and_exit_codes() {
     let bin = env!("CARGO_BIN_EXE_zrun");
-    let output=Command::new(bin).env("ZRUN_SHELL","/missing-backend").args(["-c",
-        "mark=private; export VALUE='two words'; printf '[%s]' \"$0\" \"$@\"; async t -- printf 'task=%s/%s' \"$mark\" \"$VALUE\"; await t; false; printf ':%s' $?; exit 37",
-        "fixture","a b","c"]).output().unwrap();
+    let script = concat!(
+        "mark=private; export VALUE='two words'; printf '[%s]' \"$0\" \"$@\"; ",
+        "async t -- printf 'task=%s/%s' \"$mark\" \"$VALUE\"; ",
+        "await t; false; printf ':%s' $?; exit 37",
+    );
+    let output = Command::new(bin)
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", script, "fixture", "a b", "c"])
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(37), "{output:?}");
     assert_eq!(output.stdout, b"[fixture][a b][c]task=private/two words:1");
     assert!(output.stderr.is_empty());
@@ -79,7 +86,7 @@ fn files_stdin_and_login_options_share_the_native_session() {
         "export MARK='two words'\nasync one -- printf '%s' \"$MARK\"\nawait one\nexit 27\n";
     let root = std::env::temp_dir().join(format!("zrun-native-route-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
-    for file in ["plain", "plain.zrun", "-script"] {
+    for file in ["plain", "plain.zrun", "-script", "-c", "run"] {
         fs::write(root.join(file), source).unwrap();
         let out = Command::new(bin)
             .env("ZRUN_SHELL", "/missing-backend")
@@ -116,4 +123,30 @@ fn files_stdin_and_login_options_share_the_native_session() {
             "{flags:?}: {out:?}"
         );
     }
+}
+
+#[test]
+fn await_delivers_child_stderr_and_status_after_another_statement() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", "async failing -- sh -c 'printf OUT; printf ERR >&2; exit 19'\nprintf FIRST\nawait failing"])
+        .output().unwrap();
+    assert_eq!(output.status.code(), Some(19), "{output:?}");
+    assert_eq!(output.stdout, b"FIRSTOUT");
+    assert_eq!(output.stderr, b"ERR");
+}
+
+#[test]
+fn noninteractive_foreground_program_keeps_the_callers_process_group() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", "python3 -c 'import os; print(os.getpgrp())'"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // SAFETY: getpgrp reads the test process's group and has no arguments.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        unsafe { libc::getpgrp() }.to_string()
+    );
 }

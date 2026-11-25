@@ -197,17 +197,26 @@ impl Streams {
 }
 
 #[derive(Default)]
-pub(super) struct Control(Mutex<(bool, i32)>);
+pub(super) struct Control {
+    active: Mutex<(bool, i32)>,
+    background: bool,
+}
 impl Control {
+    pub fn background() -> Self {
+        Self {
+            background: true,
+            ..Self::default()
+        }
+    }
     pub fn cancel(&self) {
-        let mut c = self.0.lock().unwrap();
+        let mut c = self.active.lock().unwrap();
         c.0 = true;
         if c.1 > 0 {
             signal_group(c.1, libc::SIGKILL);
         }
     }
     fn active(&self, pid: i32) -> io::Result<()> {
-        let mut c = self.0.lock().unwrap();
+        let mut c = self.active.lock().unwrap();
         c.1 = pid;
         if c.0 {
             if pid > 0 {
@@ -251,6 +260,9 @@ impl Drop for Pipeline<'_> {
         if !self.children.is_empty() {
             signal_group(self.group, libc::SIGKILL);
             for c in &mut self.children {
+                if self.group == 0 {
+                    let _ = c.kill();
+                }
                 let _ = c.wait();
             }
         }
@@ -287,6 +299,9 @@ fn pipeline(
     };
     let mut input = None;
     let mut exits = false;
+    // Noninteractive foreground commands inherit the caller's process group so
+    // interrupts and hangups delivered to a script also reach its children.
+    let owns_group = tty || control.background;
     for (i, ast) in cmds.iter().enumerate() {
         let last = i + 1 == cmds.len();
         let mut streams = base.copy()?;
@@ -315,7 +330,18 @@ fn pipeline(
                 words.push(state.word(w));
             }
         }
-        let n=ast.words.iter().take_while(|w|matches!(w.first(),Some(Part::Text(s)) if s.split_once('=').is_some_and(|(k,_)|syntax::identifier(k)))).count();
+        let n = ast
+            .words
+            .iter()
+            .take_while(|word| {
+                let Some(Part::Text(prefix)) = word.first() else {
+                    return false;
+                };
+                prefix
+                    .split_once('=')
+                    .is_some_and(|(name, _)| syntax::identifier(name))
+            })
+            .count();
         let assignments = words[..n]
             .iter()
             .map(|w| w.split_once('=').expect("validated assignment"));
@@ -351,8 +377,10 @@ fn pipeline(
             .envs(assignments)
             .stdin(Stdio::from(streams.input))
             .stdout(Stdio::from(streams.out))
-            .stderr(Stdio::from(streams.err.try_clone()?))
-            .process_group(pipeline.group);
+            .stderr(Stdio::from(streams.err.try_clone()?));
+        if owns_group {
+            cmd.process_group(pipeline.group);
+        }
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -361,7 +389,7 @@ fn pipeline(
             }
         };
         let first = pipeline.children.is_empty();
-        if first {
+        if first && owns_group {
             pipeline.group = child.id() as i32;
         }
         pipeline.children.push(child);

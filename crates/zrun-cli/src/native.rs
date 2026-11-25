@@ -239,7 +239,7 @@ pub(super) fn source(input: impl BufRead, args: Vec<OsString>) -> io::Result<u8>
         if line.len() > crate::execution::Batch::MAX_INPUT {
             return Err(error("command exceeded the input limit"));
         }
-        session.line(&line, false, None)?;
+        session.line(&line, io::stdin().is_terminal(), None)?;
         if let Some(code) = session.state.exit {
             return Ok(code);
         }

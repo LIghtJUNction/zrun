@@ -85,7 +85,7 @@ impl Tasks {
             return Err(error("invalid task name"));
         }
         let name = name.to_owned();
-        let control = Arc::new(Control::default());
+        let control = Arc::new(Control::background());
         let token = control.clone();
         let owner = state.clone();
         let sender = self.sender.clone();
