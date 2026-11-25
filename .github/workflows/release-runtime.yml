@@ -1,0 +1,96 @@
+name: Release runtime crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full main-history commit to package
+        type: string
+        required: true
+      publish:
+        description: Publish the verified runtime crates to crates.io
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zrun-runtime-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+
+  package:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      receipt: ${{ steps.plan.outputs.receipt }}
+      missing: ${{ steps.plan.outputs.missing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - name: Check publication safeguards
+        run: python3 -m unittest discover -s workflow/scripts -p test_release_runtime.py
+      - name: Verify package content, provenance and registry state
+        id: plan
+        working-directory: source
+        env:
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: python3 ../workflow/scripts/release_runtime.py prepare
+
+  publish:
+    if: inputs.publish && needs.package.outputs.missing != ''
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: source
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      HAS_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      VERIFIED_RECEIPT: ${{ needs.package.outputs.receipt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - name: Recheck the remaining packages against the verified bytes
+        id: plan
+        run: python3 ../workflow/scripts/release_runtime.py resume
+      - name: Obtain a short-lived crates.io token
+        if: steps.plan.outputs.missing != '' && env.HAS_REGISTRY_TOKEN != 'true'
+        id: registry
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Upload the verified packages in dependency order
+        if: steps.plan.outputs.missing != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.registry.outputs.token }}
+          MISSING_PACKAGES: ${{ steps.plan.outputs.missing }}
+        run: |
+          read -ra packages <<< "$MISSING_PACKAGES"
+          args=()
+          for package in "${packages[@]}"; do args+=(-p "$package"); done
+          cargo publish --locked --no-verify "${args[@]}"
+      - name: Check all six published checksums
+        run: python3 ../workflow/scripts/release_runtime.py confirm

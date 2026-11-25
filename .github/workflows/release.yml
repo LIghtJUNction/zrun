@@ -3,6 +3,10 @@ name: Release zrun P0
 on:
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: Full main-history commit to release (defaults to the dispatched main revision)
+        type: string
+        required: false
       tag:
         description: Exact P0 preview tag matching Cargo.toml
         type: string
@@ -20,6 +24,8 @@ jobs:
   validate:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
 
   publish:
     needs: validate
@@ -30,11 +36,12 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      TARGET_COMMIT: ${{ github.sha }}
+      TARGET_COMMIT: ${{ needs.validate.outputs.source_sha }}
       CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.validate.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

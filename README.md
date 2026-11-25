@@ -126,3 +126,9 @@ MIT License。
 ## P0 通知路径后续实验
 
 [2026-11-23 配对实验](docs/measurements/p0-parking-20261123.md)记录了准备休眠时才发送线程通知的修改、400 个独立进程样本，以及通过的 Loom/Miri 检查。三个规模的自唤醒吞吐有改善证据，spawn 与每任务内存没有明确收益；相对 Tokio 的整体验收仍未通过。
+
+### 发布运行时库
+
+从 GitHub Actions 的 **Release runtime crates** 选择 `main`，填写要发布的完整提交 SHA。该提交须属于所选 `main` 的历史。默认运行三平台 CI，在 Linux 上打包并编译六个运行时 crate，再逐个核对 crates.io 已有版本的校验值。勾选 `publish` 后，工作流按依赖顺序上传缺少的包。重复运行会跳过内容一致的版本，发现已撤回的版本或内容冲突时会停止。
+
+上传使用本仓库的 `CARGO_REGISTRY_TOKEN`，或为六个 crate 配置指向 `LIghtJUNction/zrun` 的 `release-runtime.yml` 可信发布者。GitHub 预览版通过 **Release zrun P0** 单独发布，可填写同一提交 SHA 来生成二进制与源码归档。
