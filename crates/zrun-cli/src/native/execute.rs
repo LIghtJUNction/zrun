@@ -21,7 +21,7 @@ pub(super) struct State {
     pub cwd: PathBuf,
     pub env: BTreeMap<OsString, OsString>,
     locals: BTreeMap<String, String>,
-    pub(super) aliases: BTreeMap<String, Vec<Word>>,
+    pub(super) aliases: BTreeMap<String, (String, Vec<Word>)>,
     pub status: u8,
     pub exit: Option<u8>,
     pub positional: Vec<OsString>,
@@ -129,10 +129,23 @@ impl State {
                 0
             }
             "alias" => {
+                let display = |out: &mut File, name: &str, body: &str| {
+                    writeln!(out, "alias {name}='{}'", body.replace('\'', "'\\''"))
+                };
+                if args.is_empty() {
+                    for (name, (body, _)) in &self.aliases {
+                        display(out, name, body)?;
+                    }
+                }
                 for arg in args {
-                    let (key, body) = arg
-                        .split_once('=')
-                        .ok_or_else(|| error("alias NAME=COMMAND"))?;
+                    let Some((key, body)) = arg.split_once('=') else {
+                        let (body, _) = self
+                            .aliases
+                            .get(arg)
+                            .ok_or_else(|| error(format!("alias: unknown name {arg}")))?;
+                        display(out, arg, body)?;
+                        continue;
+                    };
                     if key.is_empty()
                         || key.starts_with('-')
                         || !key
@@ -151,7 +164,8 @@ impl State {
                     if command.words.is_empty() || !command.redirects.is_empty() {
                         return Err(error("alias needs a simple command"));
                     }
-                    self.aliases.insert(key.into(), command.words.clone());
+                    self.aliases
+                        .insert(key.into(), (body.into(), command.words.clone()));
                 }
                 0
             }
@@ -387,7 +401,7 @@ fn pipeline(
         if let Some((name, rest)) = args.split_first()
             && name != "command"
             && name != "exec"
-            && let Some(definition) = state.aliases.get(name)
+            && let Some((_, definition)) = state.aliases.get(name)
         {
             expansion = definition
                 .iter()

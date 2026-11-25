@@ -46,6 +46,13 @@ fn interactive_rc_is_native_and_batch_execution_is_independent() {
         .unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     assert_eq!(r.stdout, b"<two words><one arg>");
+    let query = shell(home).args(["-ic", "alias show"]).output().unwrap();
+    assert!(query.status.success());
+    assert!(
+        String::from_utf8(query.stdout)
+            .unwrap()
+            .starts_with("alias show=")
+    );
     for (flag, disable) in [("-c", false), ("-ic", true)] {
         let mut cmd = shell(home);
         if disable {
