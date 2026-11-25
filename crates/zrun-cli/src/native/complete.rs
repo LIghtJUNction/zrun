@@ -2,7 +2,7 @@
 mod branches;
 mod commands;
 
-use super::{execute::State, syntax};
+use super::{BUILTINS, execute::State, syntax};
 use commands::Group;
 use std::{
     collections::BTreeSet,
@@ -18,11 +18,6 @@ pub(super) struct Completion {
     pub(super) replace: Option<(Range<usize>, String)>,
     pub(super) candidates: Vec<String>,
 }
-
-const BUILTINS: &[&str] = &[
-    ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
-    "pwd", "shell", "true", "unalias", "unset", "zsh-call",
-];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Position {
@@ -204,7 +199,7 @@ fn display_safe(s: &str) -> bool {
     })
 }
 
-fn executable(path: &Path) -> bool {
+pub(super) fn executable(path: &Path) -> bool {
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };

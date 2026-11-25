@@ -93,7 +93,13 @@ enum Line {
     Rejected,
     Eof,
 }
+const BUILTINS: &[&str] = &[
+    ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
+    "pwd", "shell", "true", "unalias", "unset", "zsh-call",
+];
+
 struct Session {
+    prompt_navigation: bool,
     state: State,
     tasks: Tasks,
     io: Streams,
@@ -106,6 +112,7 @@ impl Session {
             state.positional = args;
         }
         Ok(Self {
+            prompt_navigation: false,
             state,
             tasks: Tasks::new(),
             io: Streams::terminal()?,
@@ -171,13 +178,14 @@ impl Session {
                     tty,
                 )
             }
-            _ => execute::execute(
-                &mut self.state,
-                &syntax::parse(line)?,
-                &self.io,
-                &self.control,
-                tty,
-            ),
+            _ => {
+                let program = syntax::parse(line)?;
+                if self.prompt_navigation && self.state.auto_cd(line, &program)? {
+                    0
+                } else {
+                    execute::execute(&mut self.state, &program, &self.io, &self.control, tty)
+                }
+            }
         };
         self.state.status = code;
         Ok(())
@@ -189,6 +197,7 @@ pub(super) fn interactive() -> io::Result<u8> {
     if let Some(code) = session.state.exit {
         return Ok(code);
     }
+    session.prompt_navigation = true;
     let signal = Interrupt::new()?;
     let mut history = history::History::load();
     loop {

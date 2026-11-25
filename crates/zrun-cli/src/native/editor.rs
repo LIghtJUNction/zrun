@@ -53,6 +53,47 @@ impl Buffer {
         self.line.replace_range(range, text);
         self.history_index = None;
     }
+    fn kill_component(&mut self) {
+        let mut chars = self.line[..self.cursor].char_indices();
+        let mut quote = None;
+        let mut in_word = false;
+        let mut in_component = false;
+        let mut start = 0;
+        let mut end = self.cursor;
+        while let Some((i, c)) = chars.next() {
+            if quote == Some(c) {
+                quote = None;
+                if i + 1 == self.cursor && start < i {
+                    end = i; // Leave the closing quote to the right of the cursor.
+                }
+            } else if quote.is_none() && matches!(c, '\'' | '"') {
+                if !in_word {
+                    start = i;
+                    in_word = true;
+                }
+                quote = Some(c);
+            } else if quote.is_none() && c.is_whitespace() {
+                in_word = false;
+                in_component = false;
+            } else if c == '/' {
+                if !in_word {
+                    start = i; // A standalone root is a deletable word.
+                }
+                in_word = true;
+                in_component = false;
+            } else {
+                if !in_component {
+                    start = i;
+                }
+                in_component = true;
+                in_word = true;
+                if c == '\\' && quote != Some('\'') {
+                    chars.next();
+                }
+            }
+        }
+        self.replace(start..end, "");
+    }
     fn recall(&mut self, history: &History, older: bool) {
         let i = self.history_index.unwrap_or(history.len());
         let next = if older {
@@ -360,14 +401,7 @@ pub(super) fn read_line(
                 }
             }
             Key::Byte(21) => edit.replace(0..edit.cursor, ""),
-            Key::Byte(23) => {
-                let prefix = &edit.line[..edit.cursor];
-                let start = prefix
-                    .trim_end()
-                    .rfind(char::is_whitespace)
-                    .map_or(0, |i| i + prefix[i..].chars().next().unwrap().len_utf8());
-                edit.replace(start..edit.cursor, "");
-            }
+            Key::Byte(23) => edit.kill_component(),
             Key::Byte(16) => edit.recall(history, true),
             Key::Byte(14) => edit.recall(history, false),
             Key::Sequence(seq) => match seq.as_slice() {

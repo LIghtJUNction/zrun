@@ -82,6 +82,54 @@ with tempfile.TemporaryDirectory() as tmp:
         prompt_after()
         assert (root / "ran").read_text() == "words/茶 叶"
 
+        # Only the interactive shell treats a bare directory as a cd.
+        nested = root / "words" / "路径 with spaces"
+        nested.mkdir()
+        def assert_cwd(path):
+            prompt_after(b"pwd > where")
+            assert (path / "where").read_text().rstrip("\n") == str(path)
+            (path / "where").unlink()
+
+        prompt_after(b"words/")
+        assert_cwd(root / "words")
+        prompt_after(b"\x1b[200~" + nested.as_posix().encode() + b"/\x1b[201~")
+        assert_cwd(nested)
+        prompt_after(b"..")
+        prompt_after(b"cd -")
+        assert_cwd(nested)
+        prompt_after(b"..")
+        prompt_after(b"'" + nested.name.encode() + b"'")
+        assert_cwd(nested)
+        prompt_after(b"..")
+        prompt_after(b"..")
+        assert_cwd(root)
+
+        # A directory of the same name must never intercept a command.
+        # The fixture executable lives in the parent, on this shell's PATH.
+        for name in ("zfixture-command", "pwd", "go"):
+            (nested / name).mkdir()
+        prompt_after(b"'" + nested.as_posix().encode() + b"'")
+        prompt_after(b"zfixture-command")
+        assert (nested / "ran").read_text() == ""
+        prompt_after(b"pwd")
+        prompt_after(b"alias go='zfixture-command alias'")
+        prompt_after(b"go")
+        assert (nested / "ran").read_text() == "alias"
+        assert_cwd(nested)
+        prompt_after(b"'" + root.as_posix().encode() + b"'")
+
+        # Each Ctrl-W removes one component, even across trailing slashes,
+        # quoted or escaped spaces, and UTF-8 text to the left of the cursor.
+        for keys, expected in (
+            (b"one/two/three/\x17", "one/two/"),
+            (b"one/two/three/\x17\x17", "one/"),
+            ("一/茶\\ 叶/尾".encode() + b"\x17\x17", "一/"),
+            ("'一/茶 叶'".encode() + b"\x17" + "新".encode(), "一/新"),
+            ("一/茶叶/尾".encode() + b"\x02\x02\x17" + "新".encode(), "一/新/尾"),
+        ):
+            prompt_after(b"zfixture-command " + keys)
+            assert (root / "ran").read_text() == expected
+
         # Mid-line backspace/delete operate on whole UTF-8 characters.
         send("zfixture-command 甲乙丁".encode() + b"\x1b[D\x7f" + "丙".encode())
         send(b"\x1b[3~" + "😊".encode())

@@ -127,6 +127,16 @@ fn files_stdin_and_login_options_share_the_native_session() {
 }
 
 #[test]
+fn script_commands_treat_a_directory_as_an_external_command() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .env("ZRUN_NO_RC", "1")
+        .args(["-ic", "./"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(126), "{output:?}");
+}
+
+#[test]
 fn await_delivers_child_stderr_and_status_after_another_statement() {
     let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
         .env("ZRUN_SHELL", "/missing-backend")

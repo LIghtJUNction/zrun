@@ -82,6 +82,78 @@ impl State {
         }
         self.locals.insert(k.into(), v);
     }
+    fn change_directory(&mut self, arg: &Path) -> io::Result<()> {
+        let next = self.cwd.join(arg).canonicalize()?;
+        if !next.is_dir() {
+            return Err(error("cd: not a directory"));
+        }
+        self.env
+            .insert("OLDPWD".into(), self.cwd.as_os_str().into());
+        self.env.insert("PWD".into(), next.as_os_str().into());
+        self.locals.remove("PWD");
+        self.locals.remove("OLDPWD");
+        self.cwd = next;
+        Ok(())
+    }
+    pub(super) fn auto_cd(&mut self, line: &str, program: &Program) -> io::Result<bool> {
+        let [(Link::Always, pipeline)] = program.as_slice() else {
+            return Ok(false);
+        };
+        let [command] = pipeline.as_slice() else {
+            return Ok(false);
+        };
+        let Some(first) = command.words.first() else {
+            return Ok(false);
+        };
+        if !command.redirects.is_empty() {
+            return Ok(false);
+        }
+        let name = self.word(first);
+        if name.is_empty()
+            || super::BUILTINS.contains(&name.as_str())
+            || self.aliases.contains_key(&name)
+            || name
+                .split_once('=')
+                .is_some_and(|(key, _)| syntax::identifier(key))
+        {
+            return Ok(false);
+        }
+        // An unquoted pasted directory may contain spaces. Take the complete literal
+        // line only when every parsed word is unchanged; never reinterpret shell syntax.
+        let candidate = if command.words.len() == 1 {
+            name.as_str()
+        } else if line
+            .split_whitespace()
+            .map(Some)
+            .eq(command.words.iter().map(|word| match word.as_slice() {
+                [Part::Text(text)] => Some(text.as_str()),
+                _ => None,
+            }))
+        {
+            line
+        } else {
+            return Ok(false);
+        };
+        let directory = self.cwd.join(candidate);
+        if !directory.is_dir() {
+            return Ok(false);
+        }
+        let is_command = |path: &Path| path.is_file() && super::complete::executable(path);
+        let command_exists = if name.contains('/') {
+            is_command(&self.cwd.join(&name))
+        } else {
+            let path = self
+                .env
+                .get(OsStr::new("PATH"))
+                .map_or(OsStr::new("/bin:/usr/bin"), |v| v.as_os_str());
+            std::env::split_paths(path).any(|dir| is_command(&self.cwd.join(dir).join(&name)))
+        };
+        if command_exists {
+            return Ok(false);
+        }
+        self.change_directory(&directory)?;
+        Ok(true)
+    }
     fn builtin(&mut self, argv: &[String], out: &mut File) -> io::Result<Option<u8>> {
         let Some((name, args)) = argv.split_first() else {
             return Ok(Some(0));
@@ -114,16 +186,7 @@ impl State {
                 if arg.is_empty() {
                     return Err(error("cd: directory is unset"));
                 }
-                let next = self.cwd.join(arg).canonicalize()?;
-                if !next.is_dir() {
-                    return Err(error("cd: not a directory"));
-                }
-                self.env
-                    .insert("OLDPWD".into(), self.cwd.as_os_str().into());
-                self.env.insert("PWD".into(), next.as_os_str().into());
-                self.locals.remove("PWD");
-                self.locals.remove("OLDPWD");
-                self.cwd = next;
+                self.change_directory(Path::new(&arg))?;
                 0
             }
             "pwd" => {
