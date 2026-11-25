@@ -1,15 +1,21 @@
 //! Linux native interactive shell. The session owns its parser, terminal, state and jobs.
+mod complete;
+mod editor;
 mod execute;
+mod highlight;
+mod history;
 mod prompt;
 mod syntax;
 mod tasks;
 use execute::{Control, State, Streams};
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, BufRead, IsTerminal, Read, Write},
-    os::fd::{AsRawFd, RawFd},
-    os::unix::net::UnixStream,
-    sync::Arc,
+    io::{self, BufRead, IsTerminal, Read},
+    os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI32, Ordering},
+    },
 };
 use tasks::Tasks;
 
@@ -18,14 +24,44 @@ fn error(s: impl Into<String>) -> io::Error {
 }
 struct Interrupt {
     stream: UnixStream,
-    id: signal_hook::SigId,
+    ids: Vec<signal_hook::SigId>,
+    editing: Arc<AtomicBool>,
+    terminate: Arc<AtomicI32>,
 }
 impl Interrupt {
     fn new() -> io::Result<Self> {
         let (r, w) = UnixStream::pair()?;
         r.set_nonblocking(true)?;
-        let id = signal_hook::low_level::pipe::register(libc::SIGINT, w)?;
-        Ok(Self { stream: r, id })
+        w.set_nonblocking(true)?;
+        let id = signal_hook::low_level::pipe::register(libc::SIGINT, w.try_clone()?)?;
+        let mut signal = Self {
+            stream: r,
+            ids: vec![id],
+            editing: Arc::default(),
+            terminate: Arc::default(),
+        };
+        let wake = Arc::new(w);
+        for sig in [libc::SIGHUP, libc::SIGTERM, libc::SIGQUIT] {
+            let (editing, terminate, wake) = (
+                signal.editing.clone(),
+                signal.terminate.clone(),
+                wake.clone(),
+            );
+            // SAFETY: the handler performs lock-free atomic operations and an async-signal-safe
+            // nonblocking write on a permanently borrowed fd, or restores the signal's default.
+            let id = unsafe {
+                signal_hook::low_level::register(sig, move || {
+                    if editing.load(Ordering::SeqCst) {
+                        terminate.store(sig, Ordering::SeqCst);
+                        libc::write(wake.as_raw_fd(), b"t".as_ptr().cast(), 1);
+                    } else {
+                        let _ = signal_hook::low_level::emulate_default_handler(sig);
+                    }
+                })
+            }?;
+            signal.ids.push(id);
+        }
+        Ok(signal)
     }
     fn take(&self) -> io::Result<bool> {
         let mut seen = false;
@@ -44,72 +80,17 @@ impl Interrupt {
 }
 impl Drop for Interrupt {
     fn drop(&mut self) {
-        signal_hook::low_level::unregister(self.id);
+        for id in self.ids.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
     }
 }
 enum Line {
     Text(String),
     Cancel,
+    Rejected,
     Eof,
 }
-fn read_line(signal: &Interrupt, prompt: &str) -> io::Result<Line> {
-    eprint!("{prompt}");
-    io::stderr().flush()?;
-    let mut line = Vec::new();
-    loop {
-        let mut fds = [
-            libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: signal.stream.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // SAFETY: fds contains exactly two initialized pollfd values.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        if signal.take()? {
-            eprintln!();
-            return Ok(Line::Cancel);
-        }
-        if fds[0].revents == 0 {
-            continue;
-        }
-        let mut byte = 0u8;
-        // SAFETY: byte is one writable byte and fd 0 is only borrowed.
-        let n = unsafe { libc::read(0 as RawFd, (&raw mut byte).cast(), 1) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        if n == 0 && line.is_empty() {
-            return Ok(Line::Eof);
-        }
-        if n == 0 || byte == b'\n' {
-            return String::from_utf8(line)
-                .map(Line::Text)
-                .map_err(|_| error("command is not UTF-8"));
-        }
-        if line.len() == crate::execution::Batch::MAX_INPUT {
-            return Err(error("command exceeded the input limit"));
-        }
-        line.push(byte);
-    }
-}
-
 struct Session {
     state: State,
     tasks: Tasks,
@@ -203,8 +184,17 @@ impl Session {
 pub(super) fn interactive() -> io::Result<u8> {
     let mut session = Session::new(vec![])?;
     let signal = Interrupt::new()?;
+    let mut history = history::History::load();
     loop {
-        match read_line(&signal, &prompt::current(&session.state))? {
+        signal.editing.store(true, Ordering::SeqCst);
+        let line = editor::read_line(&signal, &session.state, &mut history);
+        signal.editing.store(false, Ordering::SeqCst);
+        let terminate = signal.terminate.load(Ordering::SeqCst);
+        if terminate != 0 {
+            signal_hook::low_level::emulate_default_handler(terminate)?;
+            return Ok(128 + terminate as u8);
+        }
+        match line? {
             Line::Text(s) => {
                 if let Err(e) = session.line(&s, true, Some(&signal)) {
                     eprintln!("zrun: {e}");
@@ -212,6 +202,7 @@ pub(super) fn interactive() -> io::Result<u8> {
                 }
             }
             Line::Cancel => session.state.status = 130,
+            Line::Rejected => session.state.status = 2,
             Line::Eof => return Ok(session.state.status),
         }
         if let Some(exit) = session.state.exit {

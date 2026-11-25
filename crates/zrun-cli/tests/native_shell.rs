@@ -180,3 +180,20 @@ fn native_shell_version_probe_is_machine_readable_without_a_terminal() {
     assert_eq!(output.stdout, b"1\n");
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn interactive_editor_completes_before_enter_and_restores_the_terminal() {
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/native_editor.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_zrun"))
+        .output()
+        .expect("python3 PTY harness");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
