@@ -33,6 +33,7 @@ const MAX_CACHE_ENTRIES: usize = 1_024;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENCODED_OUTPUT: usize = 32 * 1024 * 1024;
 const MAX_RAW_OUTPUT: usize = 128 * 1024 * 1024;
+const CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -320,6 +321,18 @@ struct Cache {
 }
 
 impl Cache {
+    fn expire(&mut self, now: Instant) {
+        self.entries.retain(|_, entry| {
+            if entry.expires <= now {
+                self.bytes -= entry.size;
+                false
+            } else {
+                true
+            }
+        });
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
     fn get(&self, key: &Key) -> Option<Arc<ResultRecord>> {
         let entry = self.entries.get(key)?;
         (entry.expires > Instant::now()).then(|| entry.result.clone())
@@ -436,8 +449,12 @@ impl Broker {
             io: io.clone(),
             timer,
         });
+        let maintenance = spawner
+            .spawn(maintain_cache(shared.clone()))
+            .map_err(io::Error::other)?;
         let workers = spawner.spawn_batch((0..PARALLEL).map(|slot| worker(shared.clone(), slot)));
         if let Some(error) = workers.iter().find_map(|worker| worker.as_ref().err()) {
+            maintenance.abort();
             for worker in workers.iter().filter_map(|worker| worker.as_ref().ok()) {
                 worker.abort();
             }
@@ -535,6 +552,17 @@ impl Broker {
             }
         }
         results
+    }
+}
+
+async fn maintain_cache(shared: Arc<Shared>) {
+    while shared.timer.sleep(CACHE_SWEEP_INTERVAL).await.is_ok() {
+        shared
+            .state
+            .lock()
+            .expect("broker state poisoned")
+            .cache
+            .expire(Instant::now());
     }
 }
 
@@ -781,5 +809,91 @@ impl Batch {
                 record(index, delivery.map_err(io::Error::other)?)?;
             }
         })?
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn insert(cache: &mut Cache, name: &str, expires: Instant) -> Weak<ResultRecord> {
+        let key = Arc::new(Key {
+            script: name.into(),
+            args: Arc::default(),
+            cwd: PathBuf::from("/"),
+            timeout_ms: 1000,
+            reuse: Reuse {
+                scope: "fixture".into(),
+                input_revision: name.into(),
+                ttl_ms: 10_000,
+            },
+        });
+        let result = Arc::new(ResultRecord {
+            exit_code: 0,
+            stdout: vec![b'x'; MAX_OUTPUT],
+            stderr: vec![b'y'; MAX_OUTPUT],
+            truncated: false,
+            error: None,
+            encoding: Encoding::default(),
+        });
+        let weak = Arc::downgrade(&result);
+        cache.insert(key, result, name.len(), expires);
+        weak
+    }
+
+    #[test]
+    fn expiry_releases_output_and_keys_without_evicting_live_results() {
+        let mut cache = Cache::default();
+        let now = Instant::now();
+        let live = insert(&mut cache, "live", now + Duration::from_secs(10));
+        let expired = insert(&mut cache, "expired", now + Duration::from_secs(1));
+        cache.expire(now + Duration::from_secs(1));
+        assert!(expired.upgrade().is_none());
+        assert!(live.upgrade().is_some());
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.order.len(), 1);
+        assert_eq!(cache.bytes, 4 + 2 * MAX_OUTPUT);
+        cache.expire(now + Duration::from_secs(10));
+        assert!(live.upgrade().is_none());
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.order.is_empty());
+        // Reinsertion after sweeping must preserve eviction/accounting invariants.
+        let next = insert(&mut cache, "next", now + Duration::from_secs(20));
+        assert!(next.upgrade().is_some());
+        assert_eq!(cache.bytes, 4 + 2 * MAX_OUTPUT);
+    }
+
+    #[test]
+    fn idle_broker_reclaims_expired_output_without_another_submission() {
+        let mut runtime = Executor::current().unwrap();
+        let broker = Broker::new(
+            PathBuf::from("/bin/sh"),
+            runtime.io(),
+            runtime.timer(),
+            &runtime.spawner(),
+        )
+        .unwrap();
+        let weak = insert(
+            &mut broker.shared.state.lock().unwrap().cache,
+            "idle",
+            Instant::now() + Duration::from_millis(20),
+        );
+        runtime
+            .block_on(async {
+                runtime_timer_sleep(&broker).await;
+            })
+            .unwrap();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(broker.shared.state.lock().unwrap().cache.bytes, 0);
+        runtime.shutdown();
+    }
+
+    async fn runtime_timer_sleep(broker: &Broker) {
+        broker
+            .shared
+            .timer
+            .sleep(CACHE_SWEEP_INTERVAL + Duration::from_millis(100))
+            .await
+            .unwrap();
     }
 }
