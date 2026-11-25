@@ -25,6 +25,7 @@ pub(super) struct State {
     pub status: u8,
     pub exit: Option<u8>,
     pub positional: Vec<OsString>,
+    pub terminal_handoff: Option<super::terminal_resume::Handoff>,
 }
 impl State {
     pub fn new() -> io::Result<Self> {
@@ -40,6 +41,7 @@ impl State {
             status: 0,
             exit: None,
             positional: vec!["zrun".into()],
+            terminal_handoff: None,
         })
     }
     fn lookup(&self, k: &str) -> String {
@@ -478,6 +480,8 @@ fn pipeline(
         if owns_group {
             cmd.process_group(pipeline.group);
         }
+        let handoff = (tty && pipeline.children.is_empty() && state.terminal_handoff.is_none())
+            .then(super::terminal_resume::Handoff::capture);
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -496,6 +500,9 @@ fn pipeline(
                 // SAFETY: descriptor 0 is the terminal used for this foreground pipeline.
                 let owner = unsafe { libc::tcgetpgrp(0) };
                 if owner > 0 {
+                    if let Some(handoff) = handoff {
+                        state.terminal_handoff = Some(handoff);
+                    }
                     pipeline.restore = Some(owner);
                     foreground(pipeline.group);
                     signal_group(pipeline.group, libc::SIGCONT);
@@ -505,7 +512,14 @@ fn pipeline(
     }
     let mut code = 0;
     for c in &mut pipeline.children {
-        code = status(c.wait()?);
+        let exit = c.wait()?;
+        if pipeline.restore.is_some()
+            && exit.signal().is_some()
+            && let Some(handoff) = &mut state.terminal_handoff
+        {
+            handoff.interrupted = true;
+        }
+        code = status(exit);
     }
     pipeline.children.clear();
     if exits {

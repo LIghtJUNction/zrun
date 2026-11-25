@@ -8,6 +8,7 @@ mod prompt;
 pub(crate) mod rc;
 mod syntax;
 mod tasks;
+mod terminal_resume;
 use execute::{Control, State, Streams};
 use std::{
     ffi::{OsStr, OsString},
@@ -212,6 +213,9 @@ pub(super) fn interactive() -> io::Result<u8> {
         }
         if let Some(exit) = session.state.exit {
             return Ok(exit);
+        }
+        if let Some(handoff) = session.state.terminal_handoff.take() {
+            handoff.before_prompt(&session.state)?;
         }
     }
 }
