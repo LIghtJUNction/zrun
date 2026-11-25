@@ -17,6 +17,8 @@ mod executor;
 #[cfg(target_os = "linux")]
 mod mcp;
 #[cfg(target_os = "linux")]
+mod native;
+#[cfg(target_os = "linux")]
 mod output;
 #[cfg(target_os = "linux")]
 mod plugin;
@@ -30,9 +32,10 @@ mod script;
 mod valkey;
 
 const HELP: &str = "Usage:
-  zrun [shell arguments...]       Enter the configured terminal shell
-  zrun COMMAND [ARGS...]        Execute a program with literal arguments
-  zrun FILE.zrun [ARGS...]        Run a shell file or a # zrun:1 async program
+  zrun                            Enter the native Linux terminal shell
+  zrun --shell [ARGS...]          Enter the configured compatibility shell
+  zrun COMMAND [ARGS...]          Execute a program with literal arguments
+  zrun FILE [ARGS...]             Run a native script or its declared interpreter
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
   zrun batch [--ready]            Run JSONL commands, optionally emit ready remote batches
@@ -65,10 +68,29 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let first = args.next();
     #[cfg(target_os = "linux")]
     let first = {
-        let script_operand = if first.as_deref() == Some(OsStr::new("--")) {
-            args.peek().filter(|arg| is_script_operand(arg))
+        let mut operand = first;
+        while matches!(
+            operand.as_deref().and_then(OsStr::to_str),
+            Some("-l" | "--login" | "-i")
+        ) && args.peek().is_some()
+        {
+            operand = args.next();
+        }
+        if matches!(
+            operand.as_deref().and_then(OsStr::to_str),
+            Some("-lc" | "-ic" | "-lic" | "-ilc")
+        ) {
+            Some("-c".into())
         } else {
-            first.as_ref().filter(|arg| is_script_operand(arg))
+            operand
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let first = {
+        let script_operand = if first.as_deref() == Some(OsStr::new("--")) {
+            args.peek().filter(|arg| is_source_file(arg))
+        } else {
+            first.as_ref().filter(|arg| is_source_file(arg))
         };
         match script_operand {
             // Ensure a dash-prefixed filename remains an operand when
@@ -88,7 +110,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
     };
     #[cfg(target_os = "linux")]
-    if let Some(path) = first.as_deref().filter(|arg| is_script_operand(arg)) {
+    if let Some(path) = first.as_deref().filter(|arg| is_source_file(arg)) {
         let path = std::path::Path::new(path);
         use std::io::Seek;
         let mut file = std::fs::File::open(path)?;
@@ -115,6 +137,56 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             command.arg(path).args(args);
             return enter_shell(command);
         }
+        file.rewind()?;
+        let positional = std::iter::once(path.as_os_str().to_owned())
+            .chain(args)
+            .collect();
+        return Ok(native::source(io::BufReader::new(file), positional)?);
+    }
+    #[cfg(target_os = "linux")]
+    if io::stdin().is_terminal()
+        && (first.is_none()
+            || (matches!(
+                first.as_deref().and_then(OsStr::to_str),
+                Some("-i" | "-l" | "--login")
+            ) && args.peek().is_none()))
+    {
+        return Ok(native::interactive()?);
+    }
+    #[cfg(target_os = "linux")]
+    if first.is_none()
+        || matches!(
+            first.as_deref().and_then(OsStr::to_str),
+            Some("-i" | "-l" | "--login" | "-s")
+        )
+    {
+        args.next_if(|arg| arg == "--");
+        let positional = std::iter::once(OsString::from("zrun"))
+            .chain(args)
+            .collect();
+        return Ok(native::source(io::stdin().lock(), positional)?);
+    }
+    if first.as_deref() == Some(OsStr::new("--shell")) {
+        let mut command = Command::new(shell()?);
+        #[cfg(unix)]
+        if invoked
+            .as_ref()
+            .and_then(|arg| std::path::Path::new(arg).file_name())
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"-"))
+        {
+            use std::os::unix::process::CommandExt;
+            let backend = shell()?;
+            let mut login = OsString::from("-");
+            login.push(backend.file_name().unwrap_or(backend.as_os_str()));
+            command.arg0(login).arg("-l");
+        }
+        command.args(args);
+        return enter_shell(command);
+    }
+    #[cfg(target_os = "linux")]
+    if first.as_deref() == Some(OsStr::new("-c")) {
+        let script = args.next().ok_or("-c needs a command")?;
+        return Ok(native::command(&script, args.collect())?);
     }
     match first.as_deref().and_then(OsStr::to_str) {
         Some("--help" | "-h") => {
@@ -174,7 +246,10 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             managed(shell()?, None, ready_order)
         }
         #[cfg(target_os = "linux")]
-        _ if first.as_deref().is_some_and(is_program_operand) => {
+        _ if first
+            .as_deref()
+            .is_some_and(|arg| !arg.as_encoded_bytes().starts_with(b"-")) =>
+        {
             use std::os::unix::process::CommandExt;
             let name = first.expect("program operand");
             let error = Command::new(&name).args(args).exec();
@@ -185,6 +260,9 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 126
             })
         }
+        #[cfg(target_os = "linux")]
+        _ => Err("unsupported zrun option; see zrun --help".into()),
+        #[cfg(not(target_os = "linux"))]
         _ => {
             let interactive = first.is_none() && io::stdin().is_terminal();
             let backend = shell()?;
@@ -213,21 +291,23 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "linux")]
-fn is_program_operand(arg: &OsStr) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    if arg.as_encoded_bytes().starts_with(b"-") || is_script_operand(arg) {
+fn is_source_file(arg: &OsStr) -> bool {
+    if is_script_operand(arg) {
+        return true;
+    }
+    if matches!(arg.to_str(), Some("run" | "batch" | "mcp")) {
         return false;
     }
     let path = std::path::Path::new(arg);
-    match path.metadata() {
-        // Preserve the existing backend-shell route for a named script in the
-        // current directory. An explicit executable path runs directly.
-        Ok(m) if m.is_file() => {
-            arg.as_encoded_bytes().contains(&b'/') && m.permissions().mode() & 0o111 != 0
-        }
-        _ => true,
+    if !path.is_file() {
+        return false;
     }
+    // A regular executable such as /bin/ls is a program operand. A text
+    // script (including executable text with no shebang) is native input.
+    let mut magic = [0; 4];
+    !std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok_and(|()| magic == *b"\x7fELF")
 }
 
 #[cfg(target_os = "linux")]
@@ -270,7 +350,7 @@ fn shebang_command(prefix: &[u8]) -> io::Result<Option<Command>> {
         };
         // GNU env may interpret quoting, assignments and options before
         // selecting its executable. Handle a plain command name and leave
-        // ambiguous forms to the configured shell so they cannot relaunch us.
+        // ambiguous forms to the native reader so they cannot relaunch us.
         let target = if let Some(command) = argument.strip_prefix(b"-S ") {
             command
                 .trim_ascii_start()

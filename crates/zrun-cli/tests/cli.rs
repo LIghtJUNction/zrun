@@ -673,11 +673,15 @@ fn plain_script_uses_its_shebang_interpreter_and_optional_argument() {
 }
 
 #[test]
-fn plain_script_with_zrun_shebang_uses_configured_shell() {
+fn plain_script_with_zrun_shebang_uses_native_shell() {
     let dir = Directory::new();
     let path = dir.0.join("wrapper.zrun");
     fs::write(&path, "#!/usr/bin/env -S zrun\nprintf wrapped\n").unwrap();
-    let output = zrun().arg(path).output().unwrap();
+    let output = zrun()
+        .env("ZRUN_SHELL", "/missing-backend")
+        .arg(path)
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"wrapped");
 }
@@ -944,7 +948,7 @@ fn login_shell_passes_the_backend_login_name_as_argv_zero() {
 
     let output = zrun()
         .arg0("-zrun")
-        .args(["-c", "printf '%s' \"$0\""])
+        .args(["--shell", "-c", "printf '%s' \"$0\""])
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -960,7 +964,7 @@ fn shell_selection_handles_a_path_alias_back_to_zrun() {
         .env_remove("ZRUN_SHELL")
         .env("PATH", &directory.0)
         .env("SHELL", "login-alias")
-        .args(["-c", "printf fallback"])
+        .args(["--shell", "-c", "printf fallback"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1035,7 +1039,7 @@ fn login_shell_uses_the_configured_backend_and_env_can_override_it() {
             .env("XDG_CONFIG_HOME", &dir.0)
             .env("SHELL", env!("CARGO_BIN_EXE_zrun"))
             .env_remove("ZRUN_SHELL")
-            .args(["-c", "printf explicit"]);
+            .args(["--shell", "-c", "printf explicit"]);
         command
     };
     let configured = launch().output().unwrap();

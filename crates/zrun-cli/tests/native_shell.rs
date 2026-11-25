@@ -1,0 +1,119 @@
+#![cfg(target_os = "linux")]
+use std::process::Command;
+
+#[test]
+fn native_command_and_async_preserve_arguments_state_and_exit_codes() {
+    let bin = env!("CARGO_BIN_EXE_zrun");
+    let output=Command::new(bin).env("ZRUN_SHELL","/missing-backend").args(["-c",
+        "mark=private; export VALUE='two words'; printf '[%s]' \"$0\" \"$@\"; async t -- printf 'task=%s/%s' \"$mark\" \"$VALUE\"; await t; false; printf ':%s' $?; exit 37",
+        "fixture","a b","c"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(37), "{output:?}");
+    assert_eq!(output.stdout, b"[fixture][a b][c]task=private/two words:1");
+    assert!(output.stderr.is_empty());
+}
+#[test]
+fn native_pty_owns_foreground_recovers_from_interrupt_and_reaps_tasks_on_eof() {
+    // Python supplies a controlling PTY; this checks process and terminal behavior end to end.
+    let output=Command::new("python3").args(["-c",r#"
+import os,pty,re,select,signal,sys,termios,time,tempfile
+binary=sys.argv[1]
+with tempfile.TemporaryDirectory() as root:
+ pid,fd=pty.fork()
+ if pid==0:
+  os.chdir(root); attrs=termios.tcgetattr(0);attrs[3] &= ~termios.ECHO;termios.tcsetattr(0,termios.TCSANOW,attrs)
+  os.execve(binary,['-zrun'],dict(os.environ,SHELL='/usr/bin/zsh',ZRUN_SHELL='/missing/configured/backend'))
+ buf=b''
+ def expect(text):
+  global buf
+  deadline=time.monotonic()+8
+  while text not in buf:
+   if time.monotonic()>deadline:raise AssertionError((text,buf))
+   if select.select([fd],[],[],0.1)[0]:buf+=os.read(fd,4096)
+  buf=buf.split(text,1)[1]
+ def line(s):os.write(fd,(s+'\n').encode())
+ try:
+  expect(b'zrun> ');assert os.path.samefile(binary,f'/proc/{pid}/exe')
+  line('printf "%s:%s\\n" "$0" "$SHELL"');expect(('zrun:'+os.path.realpath(binary)).encode());expect(b'zrun> ')
+  line('export MARK="hello world"');expect(b'zrun> ')
+  line('async one -- printf "%s" "$MARK"');expect(b'zrun> ')
+  line('await one');expect(b'hello world');expect(b'zrun> ')
+  line('sleep 25')
+  until=time.monotonic()+5
+  while os.tcgetpgrp(fd)==pid:
+   if time.monotonic()>until:raise AssertionError("child never owned foreground")
+   time.sleep(.02)
+  os.write(fd,b'\x03');expect(b'zrun> ')
+  line('echo signal=$?');expect(b'signal=130');expect(b'zrun> ')
+  os.write(fd,b'echo SHOULD_NOT_RUN');os.write(fd,b'\x03');expect(b'zrun> ')
+  line("async cleanup -- sh -c 'echo $$ > pid; exec sleep 25'");expect(b'zrun> ')
+  deadline=time.monotonic()+5
+  while not os.path.exists(root+'/pid') or not os.stat(root+'/pid').st_size:
+   if time.monotonic()>deadline:raise AssertionError('missing background pid')
+   time.sleep(.02)
+  job=int(open(root+'/pid').read());os.write(fd,b'\x04')
+  while True:
+   done,status=os.waitpid(pid,os.WNOHANG)
+   if done:break
+   if time.monotonic()>deadline:raise AssertionError('EOF failed to exit')
+   time.sleep(.02)
+  assert os.waitstatus_to_exitcode(status)==0;pid=0
+  assert not os.path.exists(f'/proc/{job}'),job
+ finally:
+  if pid:
+   try:os.kill(pid,signal.SIGKILL);os.waitpid(pid,0)
+   except ProcessLookupError:pass
+  os.close(fd)
+"#,env!("CARGO_BIN_EXE_zrun")]).output().expect("python3 PTY harness");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn files_stdin_and_login_options_share_the_native_session() {
+    use std::{fs, io::Write, process::Stdio};
+    let bin = env!("CARGO_BIN_EXE_zrun");
+    let source =
+        "export MARK='two words'\nasync one -- printf '%s' \"$MARK\"\nawait one\nexit 27\n";
+    let root = std::env::temp_dir().join(format!("zrun-native-route-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    for file in ["plain", "plain.zrun", "-script"] {
+        fs::write(root.join(file), source).unwrap();
+        let out = Command::new(bin)
+            .env("ZRUN_SHELL", "/missing-backend")
+            .current_dir(&root)
+            .args(["--", file])
+            .output()
+            .unwrap();
+        assert_eq!(
+            (out.status.code(), &out.stdout[..]),
+            (Some(27), &b"two words"[..]),
+            "{out:?}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+    for flags in [&[][..], &["-i"], &["-l"], &["--login"], &["-s"]] {
+        let mut child = Command::new(bin)
+            .env("ZRUN_SHELL", "/missing-backend")
+            .args(flags)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(source.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            (out.status.code(), &out.stdout[..]),
+            (Some(27), &b"two words"[..]),
+            "{flags:?}: {out:?}"
+        );
+    }
+}
