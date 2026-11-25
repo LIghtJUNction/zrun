@@ -9,7 +9,7 @@ zrun 提供独立的 Rust 异步运行时和面向 AI agent 的 Linux 命令执�
 
 ## 执行命令
 
-构建 Linux CLI 后，直接运行 `zrun` 进入环境中配置的 shell。`zrun run` 执行一条受管命令，`zrun batch` 从 stdin 读取 JSONL 并发执行。多个进程可以用 `ZRUN_SOCKET` 接入同一个本地队列。远程批处理可用 `batch --ready` 优先接收已完成的批次。
+在 Linux 终端直接运行 `zrun` 会进入 zrun 自己的 shell。它保存当前目录和变量，执行普通命令，也能用 `async 名称 -- 命令` 启动作业、用 `await 名称` 取回输出。`zrun run` 执行一条受管命令，`zrun batch` 从 stdin 读取 JSONL 并发执行。多个进程可以用 `ZRUN_SOCKET` 接入同一个本地队列。远程批处理可用 `batch --ready` 优先接收已完成的批次。
 
 ```sh
 cargo build --locked --release -p zrun-cli
@@ -17,7 +17,7 @@ target/release/zrun
 target/release/zrun run 'printf "%s\n" ready'
 ```
 
-运行 `zrun FILE.zrun` 可执行普通 shell 脚本。Linux 上在首行加入 `# zrun:1` 即可用 `async` 提交命名任务，再用 `await` 等待指定任务。设置 `ZRUN_SOCKET` 可让多个脚本共享执行队列和显式复用缓存。
+运行 `zrun FILE` 可执行 zrun 语法的普通脚本。文件首行的 shebang 可显式选择其他解释器。Linux 上在首行加入 `# zrun:1` 即可用 `async` 提交命名任务，再用 `await` 等待指定任务。设置 `ZRUN_SOCKET` 可让多个脚本共享执行队列和显式复用缓存。
 
 [脚本语法](docs/native-script.md) · [MCP、Unix socket、复用协议和 Project Z 集成](docs/agent-shell.md) · [Linux 预览版下载](https://github.com/LIghtJUNction/zrun/releases/tag/v0.1.0-p0.11)
 

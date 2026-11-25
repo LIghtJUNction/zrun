@@ -1,8 +1,23 @@
 # zrun 命令服务
 
-普通 `.zrun` 文件可通过 shebang 选择解释器。参见[原生异步 .zrun 脚本](native-script.md)。
+## Linux 终端
 
-在 Unix 上，`zrun` 依次查找 `ZRUN_SHELL`、`$XDG_CONFIG_HOME/zrun/shell`（默认 `~/.config/zrun/shell`）、`SHELL` 和 `/bin/sh`。配置文件写一行后端 shell 的绝对路径，例如 `/usr/bin/zsh`。这让 zrun 作为登录 shell 时也能使用原有后端。普通 shell 参数也可以直接传入，例如 `zrun -c 'cd /tmp; pwd'`。这种入口继承终端与 shell 的变量、作业控制和退出语义。受管执行从 `zrun run`、`zrun batch` 和 MCP 进入。
+在 Linux 终端运行 `zrun`、`zrun -i` 或 `zrun -l` 会看到 `zrun> `。zrun 进程读取命令，解析参数，按 `PATH` 启动程序，并把终端交给前台管道。交互会话中的 `$0` 为 `zrun`，`$SHELL` 是当前 zrun 可执行文件的路径。用 `zrun -c '命令'`、`zrun FILE` 或 `zrun < FILE` 可运行同一套语法；文件开头的 shebang 可以指定解释器。
+
+```sh
+cd /tmp
+label='two words'
+export label
+async first -- printf '<%s>\n' "$label"
+pwd
+await first
+```
+
+这段输入会先打印工作目录，再打印 `<two words>`。赋值保存在当前会话，`export` 让后续子进程继承指定变量。每个命名任务在提交时取得目录和变量的副本，标准输入为 `/dev/null`。`await 名称…` 按指定顺序交付已捕获的标准输出和错误输出，`await *` 按提交顺序等待，`await --ready` 优先交付已完成的任务。最多同时保留 128 个待收取任务，每个输出流最多保留 64 KiB。`$?` 保存上一条命令的退出码。对前台程序按 Ctrl-C 会发送中断，Ctrl-D 或 `exit` 结束当前会话。
+
+原生语法支持单双引号、反斜杠转义、变量与位置参数、管道、`&&`、`||` 及常用文件重定向。它按输入行解析；通配符展开、命令替换、函数、循环、多行引号和交互历史尚未实现。可用 `zrun --shell -c '…'` 调用配置的兼容 shell，或在 zrun 提示符输入 `shell -- 命令`。兼容 shell 的路径依次取自 `ZRUN_SHELL`、`$XDG_CONFIG_HOME/zrun/shell`（默认 `~/.config/zrun/shell`）、启动环境的 `SHELL` 和 `/bin/sh`。
+
+命名任务也可通过专用的 `# zrun:1` 文件提交给受管队列。该格式支持显式输入版本、超时及跨客户端复用。命令服务另有 `zrun run`、`zrun batch` 和 MCP 入口。详见[受管脚本语法](native-script.md)。
 
 ## 本地 socket
 
