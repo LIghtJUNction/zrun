@@ -2,7 +2,9 @@
 
 ## Linux 终端
 
-在 Linux 终端运行 `zrun`、`zrun -i` 或 `zrun -l` 会看到 `zrun> `。zrun 进程读取命令，解析参数，按 `PATH` 启动程序，并把终端交给前台管道。交互会话中的 `$0` 为 `zrun`，`$SHELL` 是当前 zrun 可执行文件的路径。用 `zrun -c '命令'`、`zrun FILE` 或 `zrun < FILE` 可运行同一套语法；文件开头的 shebang 可以指定解释器。
+在 Linux 终端运行 `zrun`、`zrun -i` 或 `zrun -l` 会进入原生交互会话。zrun 进程读取命令，解析参数，按 `PATH` 启动程序，并把终端交给前台管道。交互会话中的 `$0` 为 `zrun`，`$SHELL` 是当前 zrun 可执行文件的路径。用 `zrun -c '命令'`、`zrun FILE` 或 `zrun < FILE` 可运行同一套语法；文件开头的 shebang 可以指定解释器。
+
+默认提示符显示当前目录，例如 `~/src (main) ❯`。括号中是当前 Git 分支，上条命令失败时会显示退出码，例如 `!37`。窄窗口会先省略分支，再缩短目录。设置 `NO_COLOR=1` 可关闭颜色，设置 `ZRUN_PROMPT=plain` 可使用固定的 `zrun> `。
 
 ```sh
 cd /tmp

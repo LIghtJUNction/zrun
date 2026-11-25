@@ -1,5 +1,6 @@
 //! Linux native interactive shell. The session owns its parser, terminal, state and jobs.
 mod execute;
+mod prompt;
 mod syntax;
 mod tasks;
 use execute::{Control, State, Streams};
@@ -203,7 +204,7 @@ pub(super) fn interactive() -> io::Result<u8> {
     let mut session = Session::new(vec![])?;
     let signal = Interrupt::new()?;
     loop {
-        match read_line(&signal, "zrun> ")? {
+        match read_line(&signal, &prompt::current(&session.state))? {
             Line::Text(s) => {
                 if let Err(e) = session.line(&s, true, Some(&signal)) {
                     eprintln!("zrun: {e}");

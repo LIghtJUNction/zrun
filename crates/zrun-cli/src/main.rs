@@ -43,6 +43,7 @@ const HELP: &str = "Usage:
   zrun --zmem CLASS [COMMAND...]  Run zrun and its child commands in one zmem scope
   zrun --help
   zrun --version
+  zrun --native-shell-version     Print the native Linux shell interface version
 
 ZRUN_SHELL overrides the Unix zrun/shell configuration file and SHELL.
 ZRUN_WORKERS selects the worker count for the managed runtime.
@@ -188,6 +189,13 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             println!("{HELP}");
             Ok(0)
         }
+        #[cfg(target_os = "linux")]
+        Some("--native-shell-version") if args.peek().is_none() => {
+            println!("1");
+            Ok(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some("--native-shell-version") => Err("the native zrun shell requires Linux".into()),
         Some("--version") => {
             println!("zrun {}", env!("CARGO_PKG_VERSION"));
             Ok(0)

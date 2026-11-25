@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as root:
  pid,fd=pty.fork()
  if pid==0:
   os.chdir(root); attrs=termios.tcgetattr(0);attrs[3] &= ~termios.ECHO;termios.tcsetattr(0,termios.TCSANOW,attrs)
-  os.execve(binary,['-zrun'],dict(os.environ,SHELL='/usr/bin/zsh',ZRUN_SHELL='/missing/configured/backend'))
+  os.execve(binary,['-zrun'],dict(os.environ,SHELL='/usr/bin/zsh',ZRUN_SHELL='/missing/configured/backend',ZRUN_PROMPT='plain'))
  buf=b''
  def expect(text):
   global buf
@@ -122,6 +122,7 @@ fn files_stdin_and_login_options_share_the_native_session() {
             (Some(27), &b"two words"[..]),
             "{flags:?}: {out:?}"
         );
+        assert!(out.stderr.is_empty(), "{flags:?}: {out:?}");
     }
 }
 
@@ -149,4 +150,33 @@ fn noninteractive_foreground_program_keeps_the_callers_process_group() {
         String::from_utf8(output.stdout).unwrap().trim(),
         unsafe { libc::getpgrp() }.to_string()
     );
+}
+
+#[test]
+fn native_prompt_tracks_directory_git_status_and_terminal_capabilities() {
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/native_prompt.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_zrun"))
+        .output()
+        .expect("python3 PTY harness");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn native_shell_version_probe_is_machine_readable_without_a_terminal() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .arg("--native-shell-version")
+        .env("ZRUN_SHELL", "/missing-backend")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1\n");
+    assert!(output.stderr.is_empty());
 }
