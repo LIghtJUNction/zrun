@@ -174,13 +174,19 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
         _ => {
             let interactive = first.is_none() && io::stdin().is_terminal();
-            let mut command = Command::new(shell()?);
+            let backend = shell()?;
+            let mut command = Command::new(&backend);
             #[cfg(unix)]
             if invoked
                 .as_ref()
                 .and_then(|arg| std::path::Path::new(arg).file_name())
                 .is_some_and(|name| name.as_encoded_bytes().starts_with(b"-"))
             {
+                use std::os::unix::process::CommandExt;
+                let mut login_name = OsString::from("-");
+                login_name.push(backend.file_name().unwrap_or(backend.as_os_str()));
+                command.arg0(login_name);
+                // Shebang wrappers lose the caller's argv[0] when the kernel opens the interpreter.
                 command.arg("-l");
             }
             command.args(first.into_iter().chain(args));

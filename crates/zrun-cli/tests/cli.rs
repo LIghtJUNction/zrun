@@ -939,6 +939,19 @@ fn login_shell_forwards_command_and_exit_status() {
 }
 
 #[test]
+fn login_shell_passes_the_backend_login_name_as_argv_zero() {
+    use std::os::unix::process::CommandExt;
+
+    let output = zrun()
+        .arg0("-zrun")
+        .args(["-c", "printf '%s' \"$0\""])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"-sh");
+}
+
+#[test]
 fn shell_selection_handles_a_path_alias_back_to_zrun() {
     let directory = Directory::new();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_zrun"), directory.0.join("login-alias"))
