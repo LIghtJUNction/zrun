@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "zrun"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
 dependencies = [
  "libc",
  "zrun-executor",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-executor"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
 dependencies = [
  "zrun-io",
  "zrun-task",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "zrun-io"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
 dependencies = [
  "libc",
  "mio",
@@ -143,12 +143,12 @@ dependencies = [
 
 [[package]]
 name = "zrun-sync"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
 
 [[package]]
 name = "zrun-task"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
 
 [[package]]
 name = "zrun-time"
-version = "0.1.0-p0.2"
+version = "0.1.0-p0.11"
