@@ -6,6 +6,7 @@ mod highlight;
 mod history;
 mod prompt;
 pub(crate) mod rc;
+mod read;
 mod syntax;
 mod tasks;
 mod terminal_resume;
@@ -95,7 +96,7 @@ enum Line {
 }
 const BUILTINS: &[&str] = &[
     ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
-    "pwd", "shell", "true", "unalias", "unset", "zsh-call",
+    "pwd", "read", "shell", "true", "unalias", "unset", "zsh-call",
 ];
 
 struct Session {
@@ -176,6 +177,7 @@ impl Session {
                     &self.io,
                     &self.control,
                     tty,
+                    signal,
                 )
             }
             _ => {
@@ -183,7 +185,14 @@ impl Session {
                 if self.prompt_navigation && self.state.auto_cd(line, &program)? {
                     0
                 } else {
-                    execute::execute(&mut self.state, &program, &self.io, &self.control, tty)
+                    execute::execute(
+                        &mut self.state,
+                        &program,
+                        &self.io,
+                        &self.control,
+                        tty,
+                        signal,
+                    )
                 }
             }
         };
@@ -219,6 +228,11 @@ pub(super) fn interactive() -> io::Result<u8> {
             Line::Cancel => session.state.status = 130,
             Line::Rejected => session.state.status = 2,
             Line::Eof => return Ok(session.state.status),
+        }
+        let terminate = signal.terminate.load(Ordering::SeqCst);
+        if terminate != 0 {
+            signal_hook::low_level::emulate_default_handler(terminate)?;
+            return Ok(128 + terminate as u8);
         }
         if let Some(exit) = session.state.exit {
             return Ok(exit);

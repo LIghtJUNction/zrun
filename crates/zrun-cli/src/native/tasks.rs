@@ -56,7 +56,7 @@ fn collect(mut state: State, program: Program, control: Arc<Control>) -> io::Res
     thread::scope(|scope| {
         let out = scope.spawn(|| capture(or));
         let err = scope.spawn(|| capture(er));
-        let code = execute::execute(&mut state, &program, &streams, &control, false);
+        let code = execute::execute(&mut state, &program, &streams, &control, false, None);
         drop(streams);
         let (out, a) = out.join().map_err(|_| error("stdout collector failed"))??;
         let (err, b) = err.join().map_err(|_| error("stderr collector failed"))??;

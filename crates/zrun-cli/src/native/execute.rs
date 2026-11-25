@@ -1,5 +1,5 @@
 use super::{
-    error,
+    Interrupt, error, read,
     syntax::{self, Link, Part, Program, Redirect, Word},
 };
 use std::{
@@ -154,10 +154,16 @@ impl State {
         self.change_directory(&directory)?;
         Ok(true)
     }
-    fn builtin(&mut self, argv: &[String], out: &mut File) -> io::Result<Option<u8>> {
+    fn builtin(
+        &mut self,
+        argv: &[String],
+        streams: &mut Streams,
+        signal: Option<&Interrupt>,
+    ) -> io::Result<Option<u8>> {
         let Some((name, args)) = argv.split_first() else {
             return Ok(Some(0));
         };
+        let out = &mut streams.out;
         let code = match name.as_str() {
             ":" | "true" => 0,
             "false" => 1,
@@ -239,6 +245,13 @@ impl State {
                     self.aliases.remove(name);
                 }
                 0
+            }
+            "read" => {
+                let result = read::line(args, &mut streams.input, &mut streams.err, signal)?;
+                if let Some((name, value)) = result.assignment {
+                    self.assign(name, value, false);
+                }
+                result.status
             }
             "export" | "unset" => {
                 for entry in args {
@@ -403,6 +416,7 @@ fn pipeline(
     base: &Streams,
     control: &Control,
     tty: bool,
+    signal: Option<&Interrupt>,
 ) -> io::Result<u8> {
     control.active(0)?;
     let mut pipeline = Pipeline {
@@ -490,7 +504,7 @@ fn pipeline(
         }
         if cmds.len() == 1
             && n == 0
-            && let Some(code) = state.builtin(args, &mut streams.out)?
+            && let Some(code) = state.builtin(args, &mut streams, signal)?
         {
             return Ok(code);
         }
@@ -596,6 +610,7 @@ pub(super) fn execute(
     streams: &Streams,
     control: &Arc<Control>,
     tty: bool,
+    signal: Option<&Interrupt>,
 ) -> u8 {
     for (link, cmds) in program {
         if matches!(link, Link::Success) && state.status != 0
@@ -603,14 +618,18 @@ pub(super) fn execute(
         {
             continue;
         }
-        state.status = match pipeline(state, cmds, streams, control, tty) {
+        state.status = match pipeline(state, cmds, streams, control, tty, signal) {
             Ok(s) => s,
             Err(e) => {
                 let _ = writeln!(&streams.err, "zrun: {e}");
                 1
             }
         };
-        if state.exit.is_some() {
+        if state.exit.is_some()
+            || signal.is_some_and(|signal| {
+                signal.terminate.load(std::sync::atomic::Ordering::SeqCst) != 0
+            })
+        {
             break;
         }
     }

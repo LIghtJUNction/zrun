@@ -207,3 +207,66 @@ fn interactive_editor_completes_before_enter_and_restores_the_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn native_read_hides_input_exports_value_and_recovers_from_interrupt() {
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import os, pty, select, signal, sys, tempfile, termios, time
+
+binary = sys.argv[1]
+with tempfile.TemporaryDirectory() as root:
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(root)
+        os.execve(binary, ['-zrun'], dict(os.environ, HOME=root, ZRUN_PROMPT='plain'))
+    pending = b''
+    def expect(text):
+        global pending
+        deadline = time.monotonic() + 8
+        while text not in pending:
+            assert time.monotonic() < deadline, (text, pending)
+            if select.select([fd], [], [], 0.1)[0]:
+                pending += os.read(fd, 4096)
+        before, pending = pending.split(text, 1)
+        return before
+    def line(text):
+        os.write(fd, text + b'\n')
+    try:
+        expect(b'zrun> ')
+        line(b"read -rsp 'Enter key: ' EXAMPLE_KEY; export EXAMPLE_KEY")
+        expect(b'\r\nEnter key: ')
+        assert not termios.tcgetattr(fd)[3] & termios.ECHO
+        secret = br'secret with \slash  '
+        line(secret)
+        assert secret not in expect(b'zrun> ')
+        line(b"sh -c 'printf \"%s\" \"$EXAMPLE_KEY\"'")
+        expect(secret)
+        expect(b'zrun> ')
+        line(b"read -rsp 'Cancel key: ' EXAMPLE_KEY")
+        expect(b'\r\nCancel key: ')
+        os.write(fd, b'\x03')
+        expect(b'zrun> ')
+        line(b'echo status=$?')
+        expect(b'status=130')
+        expect(b'zrun> ')
+        line(b'stty -a')
+        expect(b' echo ')
+        expect(b'zrun> ')
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(fd)
+"#,
+            env!("CARGO_BIN_EXE_zrun"),
+        ])
+        .output()
+        .expect("python3 PTY harness");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
