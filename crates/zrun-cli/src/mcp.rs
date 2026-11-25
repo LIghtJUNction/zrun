@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::execution::{Batch, Broker, Delivery, Request};
 use crate::executor::Executor;
 
+pub(crate) mod compact;
 mod http;
 mod reply;
 
@@ -104,6 +105,7 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
     let mut client = socket
         .as_deref()
         .map(|path| http::UnixClient::new(&io, path, &timer, true));
+    let outputs = compact::Outputs::default();
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut line = Vec::new();
@@ -129,6 +131,7 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
         } else {
             let Some(response) = runtime.block_on(respond(
                 broker.as_ref().expect("local stdio has a broker"),
+                &outputs,
                 serde_json::from_slice(&line),
                 http::IngressCharge::default(),
             ))??
@@ -150,6 +153,7 @@ pub(crate) fn supports_protocol(version: &str) -> bool {
 
 async fn respond(
     broker: &Broker,
+    outputs: &compact::Outputs,
     message: serde_json::Result<Value>,
     ingress: http::IngressCharge<'_>,
 ) -> serde_json::Result<Option<Reply>> {
@@ -185,9 +189,33 @@ async fn respond(
         "ping" => json!({}),
         "tools/list" => tools(),
         "tools/call" => {
+            if params["name"] == "output_read" {
+                let page = match compact::Page::deserialize(&params["arguments"]) {
+                    Ok(page) => page,
+                    Err(error) => return rpc_error(id.clone(), -32602, &error.to_string()),
+                };
+                if let Err(error) = page.validate() {
+                    return rpc_error(id.clone(), -32602, error);
+                }
+                return match outputs.read(&page) {
+                    Ok(value) => Reply::value_tool(id, &value, false),
+                    Err(error) => Reply::value_tool(id, &json!({"error":error}), true),
+                }
+                .map(Some);
+            }
             let (batch, commands) = match parse_call(params) {
                 Ok(call) => call,
                 Err(error) => return rpc_error(id.clone(), -32602, &error),
+            };
+            let output_id = if params["name"] == "shell_run_compact" {
+                match compact::new_id() {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        return rpc_error(id.clone(), -32603, "cannot allocate an output handle");
+                    }
+                }
+            } else {
+                None
             };
             let id = id.clone();
             drop(message);
@@ -201,7 +229,16 @@ async fn respond(
                     .map(|item| item.result.capture_capacity())
                     .sum(),
             );
-            let reply = Reply::tool(&id, &records, batch, broker.output_budget()).await;
+            let reply = if let Some(output_id) = output_id {
+                let delivery = &records[0];
+                Reply::value_tool(
+                    &id,
+                    &outputs.compact(output_id, delivery),
+                    delivery.result.exit_code != 0,
+                )
+            } else {
+                Reply::tool(&id, &records, batch, broker.output_budget()).await
+            };
             drop(records);
             drop(capture);
             return reply.map(Some);
@@ -256,6 +293,24 @@ fn tools() -> Value {
                 "required":["commands"],
                 "properties":{"commands":{"type":"array", "minItems":1, "maxItems":MAX_BATCH_COMMANDS, "items":request_schema()}}
             }
+        },
+        {
+            "name":"shell_run_compact",
+            "description":"Run with shell_run policy and reuse. Preview each stream with consecutive-line counts or bounded base64. Use output_read on this endpoint to fetch captured bytes.",
+            "inputSchema":request_schema()
+        },
+        {
+            "name":"output_read",
+            "description":"Read previously captured stdout or stderr without execution. Use the private output_id on the same local stdio session or authenticated listener. Up to 64 results are available for at most 5 minutes. Byte cursors and the SHA-256 digest refer to the captured stream (up to 65536 bytes).",
+            "inputSchema":{
+                "type":"object", "additionalProperties": false, "required":["output_id","stream"],
+                "properties":{
+                    "output_id":{"type":"string","pattern":"^[0-9a-f]{32}$"},
+                    "stream":{"type":"string","enum":["stdout","stderr"]},
+                    "cursor":{"type":"integer","minimum":0,"default":0},
+                    "limit":{"type":"integer","minimum":1,"maximum":compact::PAGE_SIZE,"default":compact::PAGE_SIZE}
+                }
+            }
         }
     ]})
 }
@@ -269,7 +324,7 @@ struct CommandBatch {
 fn parse_call(params: &Value) -> Result<(bool, Vec<Request>), String> {
     let args = params.get("arguments").ok_or("missing tool arguments")?;
     let batch = match params.get("name").and_then(Value::as_str) {
-        Some("shell_run") => CommandBatch {
+        Some("shell_run" | "shell_run_compact") => CommandBatch {
             commands: vec![Deserialize::deserialize(args).map_err(|error| error.to_string())?],
         },
         Some("shell_batch") => Deserialize::deserialize(args).map_err(|error| error.to_string())?,

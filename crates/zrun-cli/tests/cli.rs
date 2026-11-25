@@ -255,6 +255,32 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
     assert_eq!(status, 200);
     assert_eq!(unix["result"]["structuredContent"]["disposition"], "cached");
 
+    // Raw captures are bearer capabilities local to the listener that issued them.
+    let compact = rpc(
+        3,
+        "tools/call",
+        json!({"name":"shell_run_compact","arguments":reusable()}),
+    );
+    let authorized = format!("Authorization: Bearer {token}\r\n");
+    let (status, reply) = post(connect_tcp(), addr, &authorized, &compact);
+    assert_eq!(status, 200);
+    let read = rpc(
+        4,
+        "tools/call",
+        json!({"name":"output_read","arguments":{
+            "output_id":reply["result"]["structuredContent"]["output_id"],"stream":"stdout"
+        }}),
+    );
+    assert_eq!(post(connect_tcp(), addr, "", &read).0, 401);
+    let (_, page) = post(connect_tcp(), addr, &authorized, &read);
+    assert_eq!(page["result"]["structuredContent"]["data"], "cmV1c2Vk");
+    let other_listener = UnixStream::connect(&sock).unwrap();
+    other_listener
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (_, unknown) = post(other_listener, "zrun", "", &read);
+    assert_eq!(unknown["result"]["isError"], true);
+
     let output = process_input(
         {
             let mut client = zrun();
@@ -1195,4 +1221,154 @@ fn program_arguments_are_literal_and_files_still_run_as_scripts() {
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(127));
+}
+
+#[test]
+fn compact_mcp_pages_from_the_same_capture_and_enforces_command_policy() {
+    use sha2::{Digest, Sha256};
+
+    let directory = Directory::new();
+    let policy = directory.0.join("policy.json");
+    fs::write(&policy, br#"{"max_calls":2}"#).unwrap();
+    let mut child = zrun()
+        .args(["mcp", "--stdio"])
+        .env("ZRUN_POLICY", policy)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |request: Value| {
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert_ne!(output.read_line(&mut line).unwrap(), 0);
+        let reply = serde_json::from_str::<Value>(&line).unwrap();
+        assert_eq!(reply["id"], request["id"]);
+        assert_eq!(reply["jsonrpc"], "2.0");
+        if request["method"] == "initialize" {
+            writeln!(
+                input,
+                r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+            )
+            .unwrap();
+        }
+        reply
+    };
+    let tool = |id: u32, name: &str, args: Value| {
+        rpc(id, "tools/call", json!({"name":name,"arguments":args}))
+    };
+    let initialized = exchange(rpc(
+        1,
+        "initialize",
+        json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}),
+    ));
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+    let discovery = exchange(rpc(2, "tools/list", json!({})));
+    let names: Vec<_> = discovery["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "shell_run",
+            "shell_batch",
+            "shell_run_compact",
+            "output_read"
+        ]
+    );
+    let args = json!({"script":r#"printf 'x\nx\n'; printf '\000\377A' >&2; exit 7"#});
+    let reply = exchange(tool(3, "shell_run_compact", args));
+    assert_eq!(reply["result"]["isError"], true);
+    let result = &reply["result"]["structuredContent"];
+    assert_eq!(result["disposition"], "executed");
+    assert_eq!(result["exit_code"], 7);
+    assert!(result["error"].is_null());
+    assert_eq!(result["truncated"], false);
+    assert_eq!(result["stdout"]["runs"], json!([{"text":"x\n","count":2}]));
+    assert_eq!(result["stderr"]["encoding"], "base64");
+    assert_eq!(
+        result["stderr"]["sha256"],
+        format!("{:x}", Sha256::digest([0, 255, 65]))
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(reply["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap(),
+        *result
+    );
+    let page = |cursor: usize, limit: usize| json!({"output_id":result["output_id"],"stream":"stderr","cursor":cursor,"limit":limit});
+    let mut other_session = zrun();
+    other_session.args(["mcp", "--stdio"]);
+    let lookup = tool(4, "output_read", page(0, 2));
+    let unknown = lines(&process_input(other_session, &format!("{lookup}\n")));
+    assert_eq!(unknown[0]["result"]["isError"], true);
+    let first = exchange(tool(4, "output_read", page(0, 2)));
+    let second = exchange(tool(5, "output_read", page(2, 2)));
+    let first = &first["result"]["structuredContent"];
+    let second = &second["result"]["structuredContent"];
+    assert_eq!(first["data"], "AP8=");
+    assert_eq!(first["next_cursor"], 2);
+    assert_eq!(first["eof"], false);
+    assert_eq!(second["data"], "QQ==");
+    assert_eq!(second["eof"], true);
+    assert_eq!(second["sha256"], first["sha256"]);
+    assert_eq!(
+        exchange(tool(6, "output_read", page(4, 1)))["result"]["isError"],
+        true
+    );
+    assert_eq!(
+        exchange(tool(7, "output_read", page(0, 4097)))["error"]["code"],
+        -32602
+    );
+
+    let second_run = exchange(tool(8, "shell_run_compact", reusable()));
+    assert_eq!(
+        second_run["result"]["structuredContent"]["disposition"],
+        "executed"
+    );
+    let rejected = exchange(tool(9, "shell_run_compact", reusable()));
+    assert_eq!(rejected["result"]["isError"], true);
+    let denied = &rejected["result"]["structuredContent"];
+    assert_eq!(denied["disposition"], "rejected");
+    assert!(denied["error"].as_str().unwrap().contains("CallLimit"));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn compact_mcp_preserves_broker_truncation_and_reports_an_authorized_cache_hit() {
+    let run = |id: u32, args: Value| {
+        rpc(
+            id,
+            "tools/call",
+            json!({"name":"shell_run_compact","arguments":args}),
+        )
+    };
+    let big = run(1, json!({"script":"head -c 70000 /dev/zero"}));
+    let first = run(2, reusable());
+    let second = run(3, reusable());
+    let mut cmd = zrun();
+    cmd.args(["mcp", "--stdio"]);
+    let rows = lines(&process_input(cmd, &format!("{big}\n{first}\n{second}\n")));
+    let result = &rows[0]["result"]["structuredContent"];
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["stdout"]["preview_truncated"], true);
+    assert_eq!(result["stdout"]["captured_bytes"], 65536);
+    assert_eq!(result["stderr"]["captured_bytes"], 0);
+    assert_eq!(
+        rows[1]["result"]["structuredContent"]["disposition"],
+        "executed"
+    );
+    assert_eq!(
+        rows[2]["result"]["structuredContent"]["disposition"],
+        "cached"
+    );
+    assert_ne!(
+        rows[1]["result"]["structuredContent"]["output_id"],
+        rows[2]["result"]["structuredContent"]["output_id"]
+    );
 }

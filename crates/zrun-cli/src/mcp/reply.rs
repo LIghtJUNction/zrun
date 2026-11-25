@@ -28,6 +28,15 @@ impl Reply {
         })
     }
 
+    pub(super) fn value_tool(id: &Value, value: &Value, failed: bool) -> serde_json::Result<Self> {
+        Self::json(&serde_json::json!({
+            "jsonrpc":"2.0", "id":id, "result":{
+                "content":[{"type":"text","text":serde_json::to_string(value)?}],
+                "structuredContent":value, "isError":failed
+            }
+        }))
+    }
+
     pub(super) async fn tool(
         id: &Value,
         records: &[Delivery],

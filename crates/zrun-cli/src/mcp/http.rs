@@ -54,6 +54,7 @@ pub(super) fn serve(
         listeners.push((
             Endpoint::Tcp(listener),
             Access {
+                outputs: super::compact::Outputs::default(),
                 authorization: Some(format!("Bearer {secret}")),
                 hosts: vec![bound.to_string(), format!("localhost:{}", bound.port())],
             },
@@ -67,6 +68,7 @@ pub(super) fn serve(
         listeners.push((
             Endpoint::Unix(listener),
             Access {
+                outputs: super::compact::Outputs::default(),
                 authorization: None,
                 hosts: vec!["localhost".to_owned(), "zrun".to_owned()],
             },
@@ -164,6 +166,7 @@ impl Endpoint {
 }
 
 struct Access {
+    outputs: super::compact::Outputs,
     authorization: Option<String>,
     hosts: Vec<String>,
 }
@@ -276,7 +279,7 @@ async fn handle(
             Ok((Frame { bytes, charge }, keep_alive)) => {
                 let message = serde_json::from_slice(&bytes);
                 drop(bytes);
-                match respond(broker, message, charge).await? {
+                match respond(broker, &access.outputs, message, charge).await? {
                     Some(reply) => (Status::Ok, Some(reply), keep_alive),
                     None => (Status::Accepted, None, keep_alive),
                 }
