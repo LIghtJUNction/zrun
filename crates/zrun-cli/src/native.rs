@@ -262,17 +262,64 @@ pub(super) fn command(script: &OsStr, args: Vec<OsString>, interactive_rc: bool)
     Ok(session.state.status)
 }
 
-pub(super) fn source(input: impl BufRead, args: Vec<OsString>) -> io::Result<u8> {
+pub(super) fn source(mut input: impl BufRead, args: Vec<OsString>) -> io::Result<u8> {
     let mut session = Session::new(args)?;
-    for line in input.lines() {
-        let line = line?;
-        if line.len() > crate::execution::Batch::MAX_INPUT {
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        // Allow both bytes of CRLF in addition to the command's byte budget.
+        if (&mut input)
+            .take(crate::execution::Batch::MAX_INPUT as u64 + 2)
+            .read_until(b'\n', &mut bytes)?
+            == 0
+        {
+            break;
+        }
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        if bytes.len() > crate::execution::Batch::MAX_INPUT {
             return Err(error("command exceeded the input limit"));
         }
-        session.line(&line, io::stdin().is_terminal(), None)?;
+        let line = std::str::from_utf8(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        session.line(line, io::stdin().is_terminal(), None)?;
         if let Some(code) = session.state.exit {
             return Ok(code);
         }
     }
     Ok(session.state.status)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::source;
+    use crate::execution::Batch;
+    use std::io::Cursor;
+
+    #[test]
+    fn streamed_command_limit_preserves_line_endings_and_bounds_reads() {
+        let mut comment = vec![b'#'; Batch::MAX_INPUT];
+        for ending in [b"\n".as_slice(), b"\r\n", b""] {
+            let mut bytes = comment.clone();
+            bytes.extend_from_slice(ending);
+            if !ending.is_empty() {
+                bytes.extend_from_slice(b"exit 7");
+            }
+            assert_eq!(
+                source(Cursor::new(bytes), vec![]).unwrap(),
+                if ending.is_empty() { 0 } else { 7 }
+            );
+        }
+        comment.extend_from_slice(b"padding\n");
+        let mut input = Cursor::new(comment);
+        assert_eq!(
+            source(&mut input, vec![]).unwrap_err().to_string(),
+            "command exceeded the input limit"
+        );
+        assert_eq!(input.position(), Batch::MAX_INPUT as u64 + 2);
+    }
 }
