@@ -256,8 +256,9 @@ with tempfile.TemporaryDirectory() as root:
         expect(b'status=130')
         expect(b'zrun> ')
         line(b'stty -a')
-        expect(b' echo ')
-        expect(b'zrun> ')
+        expect(b'\r\n')
+        modes = expect(b'zrun> ').replace(b';', b' ').split()
+        assert b'echo' in modes, modes
     finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
