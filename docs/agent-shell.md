@@ -188,3 +188,16 @@ Opening an interactive native shell reads this file once. `zrun -ic 'gs'` explic
 When Bash and its system bash-completion library are available, zrun can consult installed programmable completion functions without loading Bash startup scripts. For example, the systemd completion function can propose user units for `systemctl --user status`. Unknown external arguments stay empty even without a completion backend. Use a slash to explicitly complete a path.
 
 Type `git sta` and press Tab to see matching candidates. Repeated Tab advances, Shift-Tab moves back, and the arrow keys let you choose. Continue typing at any point to filter the original word. Enter accepts the highlighted item and runs the edited command. Right or Space inserts the choice so you can continue adding arguments. Escape restores the line and cursor from before the menu opened. A single match is filled directly. The same editor completes account aliases, executable names, paths and common Git, Cargo, and zrun subcommands.
+
+### Bash 兼容验收
+
+Linux 上的 `zrun -c` 使用 zrun 原生语言。已有 Bash 脚本可以走显式后端，例如 `ZRUN_SHELL=/usr/bin/bash zrun --shell -c '…'`。托管 MCP 命令的语法由服务进程配置的后端决定。
+
+用同一组输入比较 Bash 与两条 zrun 执行路径的退出码、标准输出和标准错误：
+
+```sh
+python3 scripts/check-bash-compat.py ~/.local/bin/zrun --require backend
+python3 scripts/check-bash-compat.py ~/.local/bin/zrun --require native
+```
+
+第二条是原生替换的初步门槛。现阶段预期失败，包含 `set -e`、`pipefail`、控制流、函数、命令替换、here-doc、数组、trap 等已知差异。任何默认替换还需覆盖真实调用方脚本、TTY 与作业控制、信号与中断、重定向与文件描述符、登录启动行为。
