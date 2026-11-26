@@ -1,0 +1,13 @@
+{
+  "unavailable": "Zrun statistics unavailable",
+  "waiting": "Waiting for a stats-enabled local zrun MCP broker",
+  "summary": "%1 started · %2 duplicate runs avoided",
+  "brokers": "%1 live MCP brokers · totals since each broker started",
+  "started": "Commands started",
+  "avoided": "Duplicate runs avoided",
+  "memory_hits": "Memory cache hits",
+  "valkey_hits": "Valkey cache hits",
+  "coalesced": "Requests merged in flight",
+  "active": "Jobs in progress",
+  "queued": "Jobs queued"
+}

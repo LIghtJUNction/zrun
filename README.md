@@ -21,6 +21,8 @@ target/release/zrun run 'printf "%s\n" ready'
 
 [脚本语法](docs/native-script.md) · [MCP、Unix socket、复用协议和 Project Z 集成](docs/agent-shell.md) · [GitHub 预览发行](https://github.com/LIghtJUNction/zrun/releases/tag/v0.1.0-p0.14)
 
+Omarchy 状态栏可实时查看 MCP 命令执行和复用计数。见 [Zrun for Omarchy](packaging/omarchy/README.md)。
+
 ## 运行一个任务
 
 需要 Rust 1.100.0。下面的例子创建任务，让出一次执行机会，等待定时器，再取回结果：

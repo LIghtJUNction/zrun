@@ -82,6 +82,7 @@ pub(super) fn serve(
                 .display()
         );
     }
+    let _stats = broker.publish_stats();
     let mut tasks = Vec::with_capacity(listeners.len());
     for (endpoint, access) in listeners {
         tasks.push(
@@ -638,7 +639,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-pub(super) fn default_socket_path() -> io::Result<PathBuf> {
+pub(crate) fn runtime_directory() -> io::Result<PathBuf> {
     let root = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -658,7 +659,11 @@ pub(super) fn default_socket_path() -> io::Result<PathBuf> {
         ));
     }
     check_private_directory(&directory)?;
-    Ok(directory.join("mcp.sock"))
+    Ok(directory)
+}
+
+pub(super) fn default_socket_path() -> io::Result<PathBuf> {
+    Ok(runtime_directory()?.join("mcp.sock"))
 }
 
 fn validate_directory(path: &Path) -> io::Result<()> {

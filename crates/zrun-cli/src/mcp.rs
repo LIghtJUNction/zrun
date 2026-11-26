@@ -13,6 +13,7 @@ use crate::executor::Executor;
 
 pub(crate) mod compact;
 mod http;
+pub(crate) use http::runtime_directory;
 mod reply;
 
 use self::reply::Reply;
@@ -100,6 +101,7 @@ fn serve_stdio(shell: PathBuf) -> io::Result<()> {
     } else {
         None
     };
+    let _stats = broker.as_ref().and_then(Broker::publish_stats);
     let timer = runtime.timer();
     let io = runtime.io().clone();
     let mut client = socket

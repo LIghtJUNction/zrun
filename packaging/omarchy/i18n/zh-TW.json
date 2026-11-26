@@ -1,0 +1,13 @@
+{
+  "unavailable": "無法讀取 zrun 統計",
+  "waiting": "等待支援統計的本機 zrun MCP 服務",
+  "summary": "已啟動 %1 次 · 避免重複執行 %2 次",
+  "brokers": "%1 個上線的 MCP 服務 · 彙總各服務啟動以來的資料",
+  "started": "已啟動命令",
+  "avoided": "避免重複執行",
+  "memory_hits": "記憶體快取命中",
+  "valkey_hits": "Valkey 快取命中",
+  "coalesced": "合併處理中的請求",
+  "active": "處理中",
+  "queued": "排隊中"
+}

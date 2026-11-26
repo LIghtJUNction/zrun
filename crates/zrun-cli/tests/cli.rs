@@ -305,6 +305,71 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
 }
 
 #[test]
+fn live_stats_count_launches_and_reuse_and_drop_exited_brokers() {
+    let directory = Directory::new();
+    let mut server = Server(
+        zrun()
+            .args(["mcp", "--stdio"])
+            .env("XDG_RUNTIME_DIR", &directory.0)
+            .env_remove("ZRUN_VALKEY_SOCKET")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start stdio broker"),
+    );
+    let mut input = server.0.stdin.take().unwrap();
+    let mut output = BufReader::new(server.0.stdout.take().unwrap());
+    for request in [
+        rpc(
+            1,
+            "tools/call",
+            json!({"name":"shell_batch","arguments":{
+                "commands":[reusable(), reusable()]
+            }}),
+        ),
+        call(2, reusable()),
+    ] {
+        writeln!(input, "{request}").unwrap();
+        let mut response = String::new();
+        assert_ne!(output.read_line(&mut response).unwrap(), 0);
+    }
+
+    let stats = || {
+        let output = zrun()
+            .arg("--stats")
+            .env("XDG_RUNTIME_DIR", &directory.0)
+            .output()
+            .unwrap();
+        lines(&output).pop().unwrap()
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let report = stats();
+        if report["avoided"] == 2 {
+            assert_eq!(
+                report,
+                json!({
+                    "version": 1, "brokers": 1, "avoided": 2,
+                    "counters": {
+                        "started": 1, "memory_hits": 1, "valkey_hits": 0,
+                        "coalesced": 1, "queued": 0, "active": 0
+                    }
+                })
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{report}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // A broker killed before its publisher can clean up is still excluded.
+    drop(server);
+    assert_eq!(stats()["brokers"], 0);
+    assert_eq!(fs::read_dir(directory.0.join("zrun")).unwrap().count(), 0);
+}
+
+#[test]
 fn batch_input_accepts_crlf_and_final_unterminated_record() {
     let mut command = zrun();
     command.arg("batch");

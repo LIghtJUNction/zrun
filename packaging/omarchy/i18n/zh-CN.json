@@ -1,0 +1,13 @@
+{
+  "unavailable": "无法读取 zrun 统计",
+  "waiting": "等待支持统计的本地 zrun MCP 服务",
+  "summary": "已启动 %1 次 · 避免重复执行 %2 次",
+  "brokers": "%1 个在线 MCP 服务 · 汇总各服务启动以来的数据",
+  "started": "已启动命令",
+  "avoided": "避免重复执行",
+  "memory_hits": "内存缓存命中",
+  "valkey_hits": "Valkey 缓存命中",
+  "coalesced": "合并在途请求",
+  "active": "处理中",
+  "queued": "排队中"
+}

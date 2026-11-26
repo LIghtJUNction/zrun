@@ -57,6 +57,18 @@ curl --unix-socket "$ZRUN_SOCKET" http://zrun/mcp \
 
 MCP 客户端依次使用 `initialize`、`notifications/initialized` 和 `tools/list`。TCP 通过 `zrun mcp --http 127.0.0.1:PORT` 启动，需要预置至少 32 个字符的 `ZRUN_MCP_TOKEN`，客户端带 `Authorization: Bearer <token>`。服务支持同时指定 `--http` 和 `--unix`。TCP 监听限制在 loopback，与 Unix socket 一样用于可信本地客户端。
 
+### 本地实时统计
+
+`zrun --stats` 返回版本为 1 的 JSON，汇总当前用户、当前运行目录下仍在线的 MCP broker。独立 stdio、TCP 和 Unix broker 都支持统计。转发到共享服务的 stdio 客户端由服务端记一次。每个 broker 启动后从零计数，退出后从汇总移除。独立的 `zrun run`、本地 batch 和交互式 Shell 不进入 MCP 统计。
+
+- `started` 统计成功启动的命令进程，包括之后执行失败或超时的命令。
+- `memory_hits`、`valkey_hits` 和 `coalesced` 分别统计本地结果命中、Valkey 结果命中和合并到在途任务的请求。三项之和为 `avoided`。
+- `queued` 和 `active` 是当前排队和已被 worker 领取的任务数。后者包括正在查 Valkey 的任务。
+- `brokers: 0` 表示当前没有可读的在线统计。命令文本、工作目录、输出与令牌不写入统计。
+
+统计快照在有效的私有 `XDG_RUNTIME_DIR` 下按需更新，最多每秒一次；缺少运行目录时 MCP 仍可正常工作。Omarchy 状态栏插件见 [安装说明](../packaging/omarchy/README.md)。
+
+
 stdio 采用每行一条 JSON-RPC。HTTP 每次 POST 处理一条消息，请求支持 Content-Length 和 chunked，响应使用 JSON，通知返回 HTTP 202。独立 GET 事件流返回 405。协议版本为 2025-11-25，兼容 2024-11-05、2025-03-26 和 2025-06-18 的初始化流程。 [MCP 传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
 ## 命令和结果

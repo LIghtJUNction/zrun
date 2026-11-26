@@ -20,6 +20,7 @@ pub(crate) async fn execute(
     io: &Handle,
     timer: &Timer,
     max_output: usize,
+    on_spawn: impl FnOnce(),
 ) -> io::Result<ResultRecord> {
     let mut command = Command::new(shell);
     command
@@ -42,6 +43,7 @@ pub(crate) async fn execute(
     }
     let expires = Instant::now() + Duration::from_millis(request.timeout_ms);
     let mut group = ChildGroup::new(zrun::process::spawn(&mut command, io)?);
+    on_spawn();
     let child = group.child.as_mut().expect("the new group owns its child");
     let mut stdout = child.take_stdout()?.expect("stdout was piped");
     let mut stderr = child.take_stderr()?.expect("stderr was piped");

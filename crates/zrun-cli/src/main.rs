@@ -31,6 +31,8 @@ mod process;
 #[cfg(target_os = "linux")]
 mod script;
 #[cfg(target_os = "linux")]
+mod stats;
+#[cfg(target_os = "linux")]
 mod valkey;
 
 const HELP: &str = "Usage:
@@ -42,6 +44,7 @@ const HELP: &str = "Usage:
   zrun FILE [ARGS...]             Run a native script or its declared interpreter
   zrun -c SCRIPT [ARGS...]        Evaluate a script with inherited terminal I/O
   zrun run SCRIPT                 Run a managed command with captured output
+  zrun --stats                   Print live local MCP broker counters as JSON
   zrun batch [--ready]            Run JSONL commands, optionally emit ready remote batches
   zrun ai [config|connect|run|compact]  Connect an AI client or summarize output
   zrun mcp [--stdio | --http ADDRESS [--unix [PATH]] | --unix [PATH]]
@@ -258,6 +261,14 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
         #[cfg(target_os = "linux")]
         Some("ai") => ai::run(args),
+        #[cfg(target_os = "linux")]
+        Some("--stats") => {
+            if args.next().is_some() {
+                return Err("--stats takes no arguments".into());
+            }
+            stats::print()?;
+            Ok(0)
+        }
         Some("mcp") => {
             #[cfg(target_os = "linux")]
             mcp::serve(shell()?, args)?;

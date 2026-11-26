@@ -385,6 +385,8 @@ struct Job {
 }
 
 struct State {
+    counters: crate::stats::Counters,
+    active: usize,
     queue: VecDeque<Job>,
     sleeping: Vec<Option<Waker>>,
     in_flight: HashMap<Arc<Key>, Vec<Subscriber>>,
@@ -419,6 +421,8 @@ impl Broker {
     ) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
+                counters: Default::default(),
+                active: 0,
                 queue: VecDeque::new(),
                 sleeping: vec![None; PARALLEL],
                 in_flight: HashMap::new(),
@@ -444,6 +448,19 @@ impl Broker {
             return Err(io::Error::other(*error));
         }
         Ok(Self { shared })
+    }
+
+    pub(crate) fn publish_stats(&self) -> Option<crate::stats::Publisher> {
+        let shared = self.shared.clone();
+        crate::stats::Publisher::start(move || {
+            let state = shared.state.lock().expect("broker state poisoned");
+            crate::stats::Counters {
+                queued: state.queue.len() as u64,
+                active: state.active as u64,
+                ..state.counters
+            }
+        })
+        .ok()
     }
 
     pub(crate) fn output_budget(&self) -> &Arc<Budget> {
@@ -564,6 +581,7 @@ impl Submission {
 impl State {
     fn enqueue(&mut self, Submission { request, key }: Submission) -> io::Result<Ticket> {
         if let Some(delivery) = key.as_ref().and_then(|key| self.cache.get(key)) {
+            self.counters.memory_hits += 1;
             return Ok(Ticket::Cached(Some(Delivery {
                 disposition: Disposition::Cached,
                 result: delivery,
@@ -583,6 +601,7 @@ impl State {
                 sender,
                 disposition: Disposition::Coalesced,
             });
+            self.counters.coalesced += 1;
             self.waiters += 1;
             return Ok(Ticket::Pending(receiver));
         }
@@ -629,6 +648,7 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
             let incoming = cx.waker().clone();
             let mut state = shared.state.lock().expect("broker state poisoned");
             let job = state.queue.pop_front();
+            state.active += usize::from(job.is_some());
             let idle = if job.is_none() {
                 state.sleeping[slot].replace(incoming)
             } else {
@@ -662,6 +682,14 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
                     &shared.io,
                     &shared.timer,
                     MAX_OUTPUT,
+                    || {
+                        shared
+                            .state
+                            .lock()
+                            .expect("broker state poisoned")
+                            .counters
+                            .started += 1;
+                    },
                 )
                 .await
                 .unwrap_or_else(ResultRecord::error);
@@ -697,6 +725,8 @@ async fn worker(shared: Arc<Shared>, slot: usize) {
                     subscribers
                 }
             };
+            state.active -= 1;
+            state.counters.valkey_hits += u64::from(cached);
             state.pending_bytes -= job.size;
             state.waiters -= subscribers.len();
             subscribers
