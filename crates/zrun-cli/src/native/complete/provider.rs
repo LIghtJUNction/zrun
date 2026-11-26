@@ -68,7 +68,7 @@ pub(super) fn candidates(state: &State, words: &[String], prefix: &str) -> Candi
         end
     "#;
     let output = Command::new("/usr/bin/timeout")
-        .args(["--signal=KILL", "0.75s"])
+        .args(["--signal=KILL", "2s"])
         .arg(fish)
         .args(["--no-config", "-c", script, "--", &line, command])
         .current_dir(&state.cwd)
