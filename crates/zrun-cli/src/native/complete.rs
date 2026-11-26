@@ -1,6 +1,7 @@
 //! Literal completion for unfinished native shell input. Never evaluates a command or expansion.
 mod branches;
 mod commands;
+mod provider;
 
 use super::{BUILTINS, execute::State, syntax};
 use commands::Group;
@@ -36,6 +37,7 @@ struct Target<'a> {
     range: Range<usize>,
     prefix: String,
     position: Position,
+    command_words: Vec<String>,
 }
 
 // Unlike the execution parser, editing must accept a trailing escape or unclosed quote.
@@ -112,6 +114,8 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
     let mut position = Position::Command;
     let mut redirect = false;
     let mut other_repo = false;
+    let mut command_words = Vec::new();
+    let mut literal_context = true;
     while i < line.len() {
         let tail = &line[i..];
         let c = tail.chars().next()?;
@@ -125,6 +129,8 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
             if c == '\n' {
                 position = Position::Command;
                 other_repo = false;
+                command_words.clear();
+                literal_context = true;
                 redirect = false;
             }
             i += c.len_utf8();
@@ -142,19 +148,22 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
             if !is_redirect {
                 position = Position::Command;
                 other_repo = false;
+                command_words.clear();
+                literal_context = true;
             }
             continue;
         }
         let (length, value, expansion) = word(tail);
         let end = i + length;
         if cursor <= end {
-            if expansion {
+            if expansion || (!literal_context && !redirect) {
                 return None;
             }
             return Some(Target {
                 word: &line[i..end],
                 range: i..end,
                 prefix: word(&line[i..cursor]).1,
+                command_words: if redirect { Vec::new() } else { command_words },
                 position: if redirect {
                     Position::Argument
                 } else {
@@ -172,17 +181,34 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
             {
                 other_repo = true;
             }
-            position = next_position(position, &line[i..end], &value);
+            let next = next_position(position, &line[i..end], &value);
+            if position == Position::Command {
+                command_words.clear();
+                if next == Position::Argument
+                    || matches!(next, Position::Group(Group::Git | Group::Cargo))
+                {
+                    literal_context &= !expansion;
+                    command_words.push(value);
+                }
+            } else if !command_words.is_empty() {
+                literal_context &= !expansion;
+                command_words.push(value);
+            }
+            position = next;
             if other_repo && position == Position::Group(Group::Git) {
                 position = Position::Group(Group::GitOtherDirectory);
             }
         }
         i = end;
     }
+    if !literal_context && !redirect {
+        return None;
+    }
     Some(Target {
         word: "",
         range: cursor..cursor,
         prefix: String::new(),
+        command_words: if redirect { Vec::new() } else { command_words },
         position: if redirect {
             Position::Argument
         } else {
@@ -288,6 +314,17 @@ fn candidates(state: &State, target: &Target<'_>) -> BTreeSet<String> {
     let prefix = target.prefix.as_str();
     if !display_safe(prefix) {
         return matches;
+    }
+    if !target.command_words.is_empty() {
+        match provider::candidates(state, &target.command_words, prefix) {
+            provider::Candidates::Provided(matches) => return matches,
+            provider::Candidates::Unregistered
+                if target.position == Position::Argument && !prefix.contains('/') =>
+            {
+                return matches;
+            }
+            _ => {}
+        }
     }
     match target.position {
         Position::Group(group) if !prefix.contains('/') => {
@@ -648,6 +685,52 @@ mod tests {
         );
         assert_eq!(f.apply("git add -- sta", ""), "git add -- status-file ");
         assert_eq!(f.apply("git >sta", ""), "git >status-file ");
+    }
+
+    #[test]
+    fn installed_completion_definitions_control_argument_candidates() {
+        let mut f = Fixture::new();
+        let Some(fish) = ["/usr/bin/fish", "/usr/local/bin/fish"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file() && executable(path))
+        else {
+            return;
+        };
+        symlink(fish, f.root.join("bin/fish")).unwrap();
+        f.file("bin/unit-fixture", 0o700);
+        f.state
+            .env
+            .insert("XDG_CONFIG_HOME".into(), f.root.as_os_str().into());
+        fs::create_dir_all(f.root.join("fish/completions")).unwrap();
+        fs::write(
+            f.root.join("fish/completions/unit-fixture.fish"),
+            "complete -c unit-fixture -f -a 'demo.service'\n",
+        )
+        .unwrap();
+        fs::create_dir(f.root.join("demo-directory")).unwrap();
+        for line in [
+            "unit-fixture dem",
+            "command unit-fixture dem",
+            "async task -- unit-fixture dem",
+            "true | unit-fixture dem",
+        ] {
+            assert_eq!(f.run(line, "").candidates, ["demo.service"], "{line}");
+        }
+        assert!(
+            f.run("unit-fixture demo-directory", "")
+                .candidates
+                .is_empty()
+        );
+        assert!(f.run("unknown-fixture dem", "").candidates.is_empty());
+        assert_eq!(
+            f.apply("unknown-fixture ./dem", ""),
+            "unknown-fixture ./demo-directory/"
+        );
+        assert_eq!(
+            f.apply("unit-fixture > dem", ""),
+            "unit-fixture > demo-directory/"
+        );
     }
 
     #[test]
