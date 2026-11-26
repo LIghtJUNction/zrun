@@ -1,0 +1,9 @@
+[Unit]
+Description=Zrun local MCP broker
+
+[Service]
+ExecStart=%h/.local/bin/zrun mcp --unix
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

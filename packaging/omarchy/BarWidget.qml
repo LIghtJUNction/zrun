@@ -6,6 +6,8 @@ Ui.BarWidget {
   id: root
   moduleName: "lightjunction.zrun"
 
+  function close() { popup.open = false }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -38,8 +40,26 @@ Ui.BarWidget {
     }
 
     onPressed: function(mouseButton) {
-      if (mouseButton === Qt.LeftButton && root.bar && root.bar.shell)
-        root.bar.shell.toggle(root.moduleName, "")
+      if (mouseButton === Qt.LeftButton) {
+        popup.open = !popup.open
+        if (popup.open)
+          Stats.refresh()
+      }
+    }
+  }
+
+  Ui.PopupCard {
+    id: popup
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    contentWidth: fittedContentWidth(Commons.Style.space(320))
+    contentHeight: fittedContentHeight(details.implicitHeight)
+
+    Panel {
+      id: details
+      anchors.left: parent.left
+      anchors.right: parent.right
     }
   }
 }
