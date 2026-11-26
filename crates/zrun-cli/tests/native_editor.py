@@ -75,12 +75,12 @@ with tempfile.TemporaryDirectory() as tmp:
         visible(b"words/multi-b")
         prompt_after(b"b")
         assert (root / "ran").read_text() == "words/multi-b"
-        send(b"zfixture-command wor\t")
+        send(b"zfixture-command ./wor\t")
         visible(b"words/")
         send("茶".encode() + b"\t")
         visible("叶".encode())
         prompt_after()
-        assert (root / "ran").read_text() == "words/茶 叶"
+        assert (root / "ran").read_text() == "./words/茶 叶"
 
         # Only the interactive shell treats a bare directory as a cd.
         nested = root / "words" / "路径 with spaces"

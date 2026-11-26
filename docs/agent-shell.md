@@ -173,6 +173,6 @@ Opening an interactive native shell reads this file once. `zrun -ic 'gs'` explic
 
 ### Completing a command at the terminal
 
-When Fish is present in the session's `PATH`, zrun can use its installed completion definitions without loading Fish startup scripts. For example, `systemctl --user status <Tab>` uses the user manager's unit candidates. An unregistered external command gets path candidates when the current word explicitly contains a slash. Without Fish, the native completion rules remain available.
+When Bash and its system bash-completion library are available, zrun can consult installed programmable completion functions without loading Bash startup scripts. For example, the systemd completion function can propose user units for `systemctl --user status`. Unknown external arguments stay empty even without a completion backend. Use a slash to explicitly complete a path.
 
 Type `git sta` and press Tab to see matching candidates. Repeated Tab advances, Shift-Tab moves back, and the arrow keys let you choose. Continue typing at any point to filter the original word. Enter accepts the highlighted item and runs the edited command. Right or Space inserts the choice so you can continue adding arguments. Escape restores the line and cursor from before the menu opened. A single match is filled directly. The same editor completes account aliases, executable names, paths and common Git, Cargo, and zrun subcommands.

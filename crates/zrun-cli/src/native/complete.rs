@@ -190,6 +190,8 @@ fn target(line: &str, cursor: usize) -> Option<Target<'_>> {
                     literal_context &= !expansion;
                     command_words.push(value);
                 }
+            } else if matches!(position, Position::Options(_, _)) && value == "--" {
+                command_words.clear();
             } else if !command_words.is_empty() {
                 literal_context &= !expansion;
                 command_words.push(value);
@@ -316,14 +318,15 @@ fn candidates(state: &State, target: &Target<'_>) -> BTreeSet<String> {
         return matches;
     }
     if !target.command_words.is_empty() {
-        match provider::candidates(state, &target.command_words, prefix) {
-            provider::Candidates::Provided(matches) => return matches,
-            provider::Candidates::Unregistered
-                if target.position == Position::Argument && !prefix.contains('/') =>
-            {
-                return matches;
-            }
-            _ => {}
+        if prefix.contains('/') && target.position == Position::Argument {
+            add_paths(state, prefix, Position::Argument, &mut matches);
+            return matches;
+        }
+        if let Some(provided) = provider::candidates(state, &target.command_words, prefix) {
+            return provided;
+        }
+        if target.position == Position::Argument {
+            return matches;
         }
     }
     match target.position {
@@ -574,13 +577,18 @@ mod tests {
             assert_eq!(f.run(prefix, "").candidates, ["dolphin"], "{prefix}");
         }
         for prefix in [
-            "true 'literal | ;' do",
-            "true \\| do",
+            "true 'literal | ;' ./do",
+            "true \\| ./do",
             ">do",
             "dolphin 2>do",
             "cat<do",
         ] {
-            assert_eq!(f.run(prefix, "").candidates, ["document"], "{prefix}");
+            let expected = if prefix.contains("./") {
+                "./document"
+            } else {
+                "document"
+            };
+            assert_eq!(f.run(prefix, "").candidates, [expected], "{prefix}");
         }
         assert!(f.run("echo # dol", "").candidates.is_empty());
         assert_eq!(f.apply("async t -", ""), "async t -- ");
@@ -591,15 +599,20 @@ mod tests {
         let f = Fixture::new();
         let name = "alpha 'quoted' \"cost$\"; $(nothing)";
         f.file(name, 0o644);
-        for prefix in ["cat alpha", "cat 'alpha", "cat \"alpha", "cat alpha\\ "] {
+        for prefix in [
+            "cat ./alpha",
+            "cat './alpha",
+            "cat \"./alpha",
+            "cat ./alpha\\ ",
+        ] {
             let line = f.apply(prefix, "");
             let program = syntax::parse(&line).unwrap();
             let word = &program[0].1[0].words[1];
             assert!(
-                matches!(&word[..],[syntax::Part::Text(text)] if text==name),
+                matches!(&word[..],[syntax::Part::Text(text)] if text==&format!("./{name}")),
                 "{line:?}"
             );
-            assert_eq!(f.run(prefix, "").candidates, [name]);
+            assert_eq!(f.run(prefix, "").candidates, [format!("./{name}")]);
         }
         assert!(f.run("cat $HOME/alpha", "").candidates.is_empty());
         assert!(f.run("cat `printf hello`", "").candidates.is_empty());
@@ -613,18 +626,18 @@ mod tests {
         f.file("海岸红", 0o600);
         f.file("éa", 0o600);
         f.file("êb", 0o600);
-        assert_eq!(f.apply("cat 海", ""), "cat 海岸");
-        assert_eq!(f.run("cat 海岸", "").candidates, ["海岸红", "海岸青"]);
-        assert!(f.run("cat 海岸", "").replace.is_none());
-        let line = "cat 海";
-        assert!(complete(&f.state, line, 5).candidates.is_empty());
+        assert_eq!(f.apply("cat ./海", ""), "cat ./海岸");
+        assert_eq!(f.run("cat ./海岸", "").candidates, ["./海岸红", "./海岸青"]);
+        assert!(f.run("cat ./海岸", "").replace.is_none());
+        let line = "cat ./海";
+        assert!(complete(&f.state, line, 7).candidates.is_empty());
         assert!(
             complete(&f.state, line, line.len() + 1)
                 .candidates
                 .is_empty()
         );
-        assert_eq!(f.apply("cat 海岸青", "old next"), "cat 海岸青 next");
-        assert_eq!(f.apply("cat 海岸青", "old|pwd"), "cat 海岸青|pwd");
+        assert_eq!(f.apply("cat ./海岸青", "old next"), "cat ./海岸青 next");
+        assert_eq!(f.apply("cat ./海岸青", "old|pwd"), "cat ./海岸青|pwd");
         fs::create_dir(f.root.join("my dir")).unwrap();
         f.file("my file", 0o644);
         assert_eq!(f.apply("cd my", ""), "cd my\\ dir/");
@@ -641,14 +654,14 @@ mod tests {
         let fifo = CString::new(f.root.join("pipe").as_os_str().as_bytes()).unwrap();
         // SAFETY: fixture owns this new pathname and keeps the C string live for mkfifo.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-        assert!(f.run("cat p", "").candidates.is_empty());
+        assert!(f.run("cat ./p", "").candidates.is_empty());
         assert!(
             !f.run("cat ", "")
                 .candidates
                 .iter()
                 .any(|s| s.starts_with('.'))
         );
-        assert_eq!(f.apply("cat .h", ""), "cat .hidden ");
+        assert_eq!(f.apply("cat ./.h", ""), "cat ./.hidden ");
     }
     #[test]
     fn git_cargo_and_zrun_complete_their_actual_command_positions() {
@@ -690,25 +703,33 @@ mod tests {
     #[test]
     fn installed_completion_definitions_control_argument_candidates() {
         let mut f = Fixture::new();
-        let Some(fish) = ["/usr/bin/fish", "/usr/local/bin/fish"]
+        fs::create_dir(f.root.join("demo-directory")).unwrap();
+        assert!(f.run("systemctl status dem", "").candidates.is_empty());
+        assert_eq!(
+            f.apply("unknown-fixture ./dem", ""),
+            "unknown-fixture ./demo-directory/"
+        );
+        let Some(bash) = ["/usr/bin/bash", "/bin/bash"]
             .into_iter()
             .map(Path::new)
             .find(|path| path.is_file() && executable(path))
         else {
             return;
         };
-        symlink(fish, f.root.join("bin/fish")).unwrap();
+        symlink(bash, f.root.join("bin/bash")).unwrap();
+        if !Path::new("/usr/share/bash-completion/bash_completion").is_file() {
+            return;
+        }
         f.file("bin/unit-fixture", 0o700);
         f.state
             .env
-            .insert("XDG_CONFIG_HOME".into(), f.root.as_os_str().into());
-        fs::create_dir_all(f.root.join("fish/completions")).unwrap();
+            .insert("BASH_COMPLETION_USER_DIR".into(), f.root.as_os_str().into());
+        fs::create_dir_all(f.root.join("completions")).unwrap();
         fs::write(
-            f.root.join("fish/completions/unit-fixture.fish"),
-            "complete -c unit-fixture -f -a 'demo.service'\n",
+            f.root.join("completions/unit-fixture.bash"),
+            "_fixture() { [[ demo.service == \"$2\"* ]] && COMPREPLY=(demo.service); }\ncomplete -F _fixture unit-fixture\n",
         )
         .unwrap();
-        fs::create_dir(f.root.join("demo-directory")).unwrap();
         for line in [
             "unit-fixture dem",
             "command unit-fixture dem",
