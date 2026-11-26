@@ -1,5 +1,6 @@
 //! Linux native interactive shell. The session owns its parser, terminal, state and jobs.
 mod complete;
+mod condition;
 mod editor;
 mod execute;
 mod highlight;
@@ -97,10 +98,10 @@ enum Line {
     Eof,
 }
 const BUILTINS: &[&str] = &[
-    ":", "ai", "alias", "async", "await", "builtin", "bye", "cd", "chdir", "dirs", "popd", "pushd",
-    "command", "exec", "exit", "export", "false", "declare", "echo", "print", "pwd", "read",
-    "readonly", "set", "shift", "shell", "typeset", "true", "type", "unalias", "unset", "whence",
-    "where", "which", "zsh-call",
+    ".", "eval", "return", "source", ":", "[", "test", "ai", "alias", "async", "await", "builtin",
+    "bye", "cd", "chdir", "dirs", "popd", "pushd", "command", "exec", "exit", "export", "false",
+    "declare", "echo", "print", "printf", "pwd", "read", "readonly", "set", "shift", "shell",
+    "typeset", "true", "type", "unalias", "unset", "whence", "where", "which", "zsh-call",
 ];
 
 struct Session {
@@ -266,8 +267,19 @@ pub(super) fn command(script: &OsStr, args: Vec<OsString>, interactive_rc: bool)
     Ok(session.state.status)
 }
 
-pub(super) fn source(mut input: impl BufRead, args: Vec<OsString>) -> io::Result<u8> {
+pub(super) fn source(input: impl BufRead, args: Vec<OsString>) -> io::Result<u8> {
     let mut session = Session::new(args)?;
+    stream_lines(input, |line| {
+        session.line(line, io::stdin().is_terminal(), None)?;
+        Ok(session.state.exit.is_none())
+    })?;
+    Ok(session.state.exit.unwrap_or(session.state.status))
+}
+
+fn stream_lines(
+    mut input: impl BufRead,
+    mut line_ready: impl FnMut(&str) -> io::Result<bool>,
+) -> io::Result<()> {
     let mut bytes = Vec::new();
     loop {
         bytes.clear();
@@ -290,12 +302,11 @@ pub(super) fn source(mut input: impl BufRead, args: Vec<OsString>) -> io::Result
         }
         let line = std::str::from_utf8(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        session.line(line, io::stdin().is_terminal(), None)?;
-        if let Some(code) = session.state.exit {
-            return Ok(code);
+        if !line_ready(line)? {
+            break;
         }
     }
-    Ok(session.state.status)
+    Ok(())
 }
 
 #[cfg(test)]

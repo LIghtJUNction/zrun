@@ -1,5 +1,6 @@
 mod directories;
 mod parameters;
+mod script;
 use super::{
     Interrupt, error, read,
     syntax::{self, Link, Part, Program, Redirect, Word},
@@ -29,6 +30,9 @@ pub(super) struct State {
     pub(super) aliases: BTreeMap<String, (String, Vec<Word>)>,
     pub status: u8,
     pub exit: Option<u8>,
+    returning: Option<u8>,
+    source_depth: usize,
+    eval_depth: usize,
     pub positional: Vec<OsString>,
     pub terminal_handoff: Option<super::terminal_resume::Handoff>,
 }
@@ -48,6 +52,9 @@ impl State {
             all_export: false,
             status: 0,
             exit: None,
+            returning: None,
+            source_depth: 0,
+            eval_depth: 0,
             positional: vec!["zrun".into()],
             terminal_handoff: None,
         })
@@ -160,6 +167,8 @@ impl State {
         &mut self,
         argv: &[String],
         streams: &mut Streams,
+        control: &Arc<Control>,
+        tty: bool,
         signal: Option<&Interrupt>,
     ) -> io::Result<Option<u8>> {
         let Some((name, args)) = argv.split_first() else {
@@ -170,10 +179,13 @@ impl State {
             query if super::lookup::is_query(query) => {
                 super::lookup::describe(self, argv, streams)?
             }
+            "printf" => super::output::printf(args, out, &mut streams.err)?,
             "echo" | "print" => super::output::print(name, args, out)?,
+            "test" | "[" => super::condition::test(name, args, &self.cwd, &mut streams.err)?,
             ":" | "true" => 0,
             "false" => 1,
-            "exit" | "bye" => {
+            "." | "source" | "eval" => self.evaluate(argv, streams, control, tty, signal)?,
+            "exit" | "bye" | "return" => {
                 if args.len() > 1 {
                     return Err(error("exit [STATUS]"));
                 }
@@ -183,7 +195,11 @@ impl State {
                         .parse::<u8>()
                         .map_err(|_| error("exit needs a status in 0..255"))?,
                 };
-                self.exit = Some(code);
+                if name == "return" && self.source_depth > 0 {
+                    self.returning = Some(code);
+                } else {
+                    self.exit = Some(code);
+                }
                 code
             }
             "dirs" | "pushd" | "popd" => self.directory_stack(name, args, out)?,
@@ -415,7 +431,7 @@ fn pipeline(
     state: &mut State,
     cmds: &[syntax::Command],
     base: &Streams,
-    control: &Control,
+    control: &Arc<Control>,
     tty: bool,
     signal: Option<&Interrupt>,
 ) -> io::Result<u8> {
@@ -548,7 +564,7 @@ fn pipeline(
         if native && (cmds.len() > 1 || n > 0) {
             if last && n == 0 {
                 let code = state
-                    .builtin(args, &mut streams, signal)?
+                    .builtin(args, &mut streams, control, tty, signal)?
                     .expect("native builtin");
                 last_builtin = Some(code);
                 continue;
@@ -558,8 +574,13 @@ fn pipeline(
                 session.assign(key, value.to_owned(), true)?;
             }
             let argv = args.to_vec();
+            let stage_control = if last {
+                control.clone()
+            } else {
+                Arc::new(Control::background())
+            };
             let mut run = move || -> io::Result<u8> {
-                match session.builtin(&argv, &mut streams, None) {
+                match session.builtin(&argv, &mut streams, &stage_control, false, None) {
                     Ok(Some(code)) => Ok(code),
                     Ok(None) => Err(error("invalid builtin dispatch")),
                     Err(e) => {
@@ -577,7 +598,7 @@ fn pipeline(
         }
         if cmds.len() == 1
             && n == 0
-            && let Some(code) = state.builtin(args, &mut streams, signal)?
+            && let Some(code) = state.builtin(args, &mut streams, control, tty, signal)?
         {
             return Ok(code);
         }
@@ -714,6 +735,7 @@ pub(super) fn execute(
             }
         };
         if state.exit.is_some()
+            || state.returning.is_some()
             || signal.is_some_and(|signal| {
                 signal.terminate.load(std::sync::atomic::Ordering::SeqCst) != 0
             })
