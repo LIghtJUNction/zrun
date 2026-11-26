@@ -27,6 +27,9 @@ pub(super) struct State {
     locals: BTreeMap<String, String>,
     readonly: std::collections::BTreeSet<String>,
     all_export: bool,
+    errexit: bool,
+    ignore_errexit: bool,
+    pipefail: bool,
     pub(super) aliases: BTreeMap<String, (String, Vec<Word>)>,
     pub status: u8,
     pub exit: Option<u8>,
@@ -50,6 +53,9 @@ impl State {
             aliases: BTreeMap::new(),
             readonly: Default::default(),
             all_export: false,
+            errexit: false,
+            ignore_errexit: false,
+            pipefail: false,
             status: 0,
             exit: None,
             returning: None,
@@ -124,7 +130,7 @@ impl State {
         let Some(first) = command.words.first() else {
             return Ok(false);
         };
-        if !command.redirects.is_empty() {
+        if command.negated || !command.redirects.is_empty() {
             return Ok(false);
         }
         let name = self.word(first);
@@ -394,7 +400,7 @@ fn foreground(id: i32) {
     }
 }
 struct Pipeline<'a> {
-    children: Vec<Child>,
+    children: Vec<(usize, Child)>,
     group: i32,
     restore: Option<i32>,
     control: &'a Control,
@@ -403,7 +409,7 @@ impl Drop for Pipeline<'_> {
     fn drop(&mut self) {
         if !self.children.is_empty() {
             signal_group(self.group, libc::SIGKILL);
-            for c in &mut self.children {
+            for (_, c) in &mut self.children {
                 if self.group == 0 {
                     let _ = c.kill();
                 }
@@ -443,7 +449,8 @@ fn pipeline(
         control,
     };
     let mut writers = Vec::new();
-    let mut last_builtin = None;
+    let mut statuses = vec![0; cmds.len()];
+    let pipefail = state.pipefail;
     let mut input = None;
     let mut exits = false;
     // Noninteractive foreground commands inherit the caller's process group so
@@ -566,7 +573,7 @@ fn pipeline(
                 let code = state
                     .builtin(args, &mut streams, control, tty, signal)?
                     .expect("native builtin");
-                last_builtin = Some(code);
+                statuses[i] = code;
                 continue;
             }
             let mut session = state.clone();
@@ -590,9 +597,9 @@ fn pipeline(
                 }
             };
             if last {
-                last_builtin = Some(run()?);
+                statuses[i] = run()?;
             } else {
-                writers.push(std::thread::Builder::new().spawn(run)?);
+                writers.push((i, std::thread::Builder::new().spawn(run)?));
             }
             continue;
         }
@@ -664,14 +671,15 @@ fn pipeline(
             Ok(child) => child,
             Err(e) => {
                 writeln!(streams.err, "zrun: {name}: {e}")?;
-                return Ok(missing(&e));
+                statuses[i] = missing(&e);
+                continue;
             }
         };
         let first = pipeline.children.is_empty();
         if first && owns_group {
             pipeline.group = child.id() as i32;
         }
-        pipeline.children.push(child);
+        pipeline.children.push((i, child));
         if first {
             control.active(pipeline.group)?;
             if tty {
@@ -688,8 +696,7 @@ fn pipeline(
             }
         }
     }
-    let mut code = 0;
-    for c in &mut pipeline.children {
+    for (index, c) in &mut pipeline.children {
         let exit = c.wait()?;
         if pipeline.restore.is_some()
             && exit.signal().is_some()
@@ -697,17 +704,23 @@ fn pipeline(
         {
             handoff.interrupted = true;
         }
-        code = status(exit);
+        statuses[*index] = status(exit);
     }
     pipeline.children.clear();
-    for writer in writers {
-        writer
+    for (index, writer) in writers {
+        statuses[index] = writer
             .join()
             .map_err(|_| error("builtin pipeline stage panicked"))??;
     }
-    if let Some(last) = last_builtin {
-        code = last;
-    }
+    let code = if pipefail {
+        statuses
+            .into_iter()
+            .rev()
+            .find(|&code| code != 0)
+            .unwrap_or(0)
+    } else {
+        statuses.last().copied().unwrap_or(0)
+    };
     if exits {
         state.exit = Some(code);
     }
@@ -721,12 +734,19 @@ pub(super) fn execute(
     tty: bool,
     signal: Option<&Interrupt>,
 ) -> u8 {
-    for (link, cmds) in program {
+    let mut lists = program.iter().peekable();
+    while let Some((link, cmds)) = lists.next() {
         if matches!(link, Link::Success) && state.status != 0
             || matches!(link, Link::Failure) && state.status == 0
         {
             continue;
         }
+        // A status inspected by && or || cannot trigger errexit, including
+        // inside an eval or sourced file invoked as the inspected command.
+        let previous = state.ignore_errexit;
+        let negated = cmds[0].negated;
+        state.ignore_errexit |=
+            negated || lists.peek().is_some_and(|(link, _)| *link != Link::Always);
         state.status = match pipeline(state, cmds, streams, control, tty, signal) {
             Ok(s) => s,
             Err(e) => {
@@ -734,6 +754,18 @@ pub(super) fn execute(
                 1
             }
         };
+        if negated && state.exit.is_none() {
+            state.status = u8::from(state.status == 0);
+        }
+        if state.errexit
+            && !state.ignore_errexit
+            && state.status != 0
+            && state.exit.is_none()
+            && state.returning.is_none()
+        {
+            state.exit = Some(state.status);
+        }
+        state.ignore_errexit = previous;
         if state.exit.is_some()
             || state.returning.is_some()
             || signal.is_some_and(|signal| {

@@ -390,3 +390,60 @@ fn printf_reuses_format_and_keeps_padding_and_binary_escapes_without_path() {
     assert!(result.status.success(), "{result:?}");
     assert_eq!(result.stdout, b"[0008:ab][0009:de]|  3.50A\0B");
 }
+
+#[test]
+fn native_errexit_and_pipefail_respect_conditional_lists_and_stage_order() {
+    let cases = [
+        ("set -e; false; printf bad", 1, ""),
+        ("set -e; false && printf bad; printf alive", 0, "alive"),
+        ("set -e; true && false; printf bad", 1, ""),
+        ("set -e; ! true; printf alive", 0, "alive"),
+        ("set -e; ! ! false; printf bad", 1, ""),
+        ("set -o pipefail; ! false | true", 0, ""),
+        ("printf '%s' !", 0, "!"),
+        (
+            "set -e; eval 'false; printf reached' && printf ok",
+            0,
+            "reachedok",
+        ),
+        ("set -eo pipefail; false | true; printf bad", 1, ""),
+        (
+            "set -o pipefail; /bin/sh -c 'exit 19' | false | true; exit $?",
+            1,
+            "",
+        ),
+        (
+            "set -o pipefail; false | /bin/sh -c 'exit 19' | true; exit $?",
+            19,
+            "",
+        ),
+        (
+            "set -o pipefail; set +o pipefail; false | true; exit $?",
+            0,
+            "",
+        ),
+    ];
+    for (script, code, stdout) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{script}: {output:?}");
+        assert_eq!(output.stdout, stdout.as_bytes(), "{script}");
+        assert!(output.stderr.is_empty(), "{script}: {output:?}");
+    }
+}
+
+#[test]
+fn a_missing_pipeline_stage_preserves_the_other_stage_and_its_status() {
+    for (options, code) in [("", 0), ("set -o pipefail; ", 127)] {
+        let script = format!("{options}/zrun-test/missing-stage | printf reached");
+        let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert_eq!(output.stdout, b"reached");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("missing-stage"));
+    }
+}

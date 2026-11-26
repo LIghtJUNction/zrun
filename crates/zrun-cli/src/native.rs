@@ -167,6 +167,7 @@ impl Session {
                     .and_then(|s| s.strip_prefix(char::is_whitespace))
                     .ok_or_else(|| error("usage: shell -- COMMAND"))?;
                 let cmd = syntax::Command {
+                    negated: false,
                     words: [
                         crate::shell()?.to_string_lossy().to_string(),
                         "-c".into(),

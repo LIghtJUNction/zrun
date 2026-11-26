@@ -33,13 +33,28 @@ impl State {
             if !(word.starts_with('-') || word.starts_with('+')) || word.len() == 1 {
                 break;
             }
-            for flag in word[1..].chars() {
+            let enabled = word.starts_with('-');
+            let flags = word[1..].chars();
+            rest = tail;
+            for flag in flags {
                 match flag {
-                    'a' => self.all_export = word.starts_with('-'),
+                    'a' => self.all_export = enabled,
+                    'e' => self.errexit = enabled,
+                    'o' => {
+                        let Some((name, remaining)) = rest.split_first() else {
+                            return Err(error("set: expected an option name"));
+                        };
+                        match name.as_str() {
+                            "allexport" => self.all_export = enabled,
+                            "errexit" => self.errexit = enabled,
+                            "pipefail" => self.pipefail = enabled,
+                            _ => return Err(error(format!("set: unsupported option {name}"))),
+                        }
+                        rest = remaining;
+                    }
                     _ => return Err(error(format!("set: unsupported option {flag}"))),
                 }
             }
-            rest = tail;
             if rest.is_empty() {
                 return Ok(0);
             }

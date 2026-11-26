@@ -28,11 +28,13 @@ pub(super) enum Link {
 enum Token {
     Word(Word),
     Pipe,
+    Negate,
     Link(Link),
     Redirect(Redirect),
 }
 #[derive(Debug, Clone, Default)]
 pub(super) struct Command {
+    pub negated: bool,
     pub words: Vec<Word>,
     pub redirects: Vec<(Redirect, Word)>,
 }
@@ -176,6 +178,12 @@ fn lex(line: &str) -> io::Result<Vec<Token>> {
                     Some(Token::Link(Link::Failure))
                 }
                 '|' => Some(Token::Pipe),
+                '!' if !inside
+                    && matches!(tokens.last(), None | Some(Token::Link(_) | Token::Negate))
+                    && chars.get(i).is_none_or(|next| next.is_whitespace()) =>
+                {
+                    Some(Token::Negate)
+                }
                 ';' | '\n' => Some(Token::Link(Link::Always)),
                 '&' if chars.get(i) == Some(&'&') => {
                     i += 1;
@@ -222,8 +230,16 @@ pub(super) fn parse(line: &str) -> io::Result<Program> {
     let mut link = Link::Always;
     while tokens.peek().is_some() {
         let mut pipeline = Vec::new();
+        let mut negated = false;
+        while matches!(tokens.peek(), Some(Token::Negate)) {
+            tokens.next();
+            negated = !negated;
+        }
         loop {
-            let mut command = Command::default();
+            let mut command = Command {
+                negated: pipeline.is_empty() && negated,
+                ..Command::default()
+            };
             loop {
                 match tokens.peek() {
                     Some(Token::Word(_)) => {
