@@ -1,0 +1,15 @@
+{
+  "unavailable": "Zrun-Statistik nicht verfügbar",
+  "waiting": "Warte auf den lokalen zrun-MCP-Dienst",
+  "summary": "%1 gestartet · %2 Ausführungen vermieden",
+  "brokers": "%1 online",
+  "started": "Gestartete Befehle",
+  "avoided": "Vermiedene Ausführungen",
+  "memory_hits": "Speicher-Cache-Treffer",
+  "valkey_hits": "Valkey-Cache-Treffer",
+  "coalesced": "Zusammengeführte Anfragen",
+  "scope": "Seit Dienststart",
+  "activity": "%1 aktiv · %2 in der Warteschlange",
+  "reuseShare": "%1 von %2 Anfragen nutzten vorhandene Arbeit",
+  "noActivity": "Noch keine Befehlsaktivität"
+}

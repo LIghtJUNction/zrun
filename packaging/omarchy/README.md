@@ -37,3 +37,11 @@ systemctl --user enable --now zrun-mcp.service
 ```sh
 codex mcp add zrun --env ZRUN_SOCKET="$XDG_RUNTIME_DIR/zrun/mcp.sock" -- "$HOME/.local/bin/zrun" mcp --stdio
 ```
+
+## 显示与覆盖范围
+
+明暗外观和界面语言跟随 Omarchy。插件提供简体中文、繁體中文、英语、日语、法语、德语和西班牙语，其他语言回退到英语。
+
+复用条按实际次数显示「复用请求 / 已有执行或复用结果的请求」。待执行、校验失败和未成功启动的请求不进入该比例。多个服务在线时汇总各服务启动以来的计数。
+
+已有 agent 可接入同一个 Unix broker。批处理也可设置 `ZRUN_SOCKET="$XDG_RUNTIME_DIR/zrun/mcp.sock"`，让 `zrun batch` 发送到该 broker。缓存和在途合并需要调用方对可复用任务提供准确的 `input_revision`，例如依赖锁文件检查或固定输入的静态分析。部署、写文件和依赖实时状态的任务应独立执行。

@@ -1,0 +1,15 @@
+{
+  "unavailable": "Estadísticas de Zrun no disponibles",
+  "waiting": "Esperando al servicio MCP local de zrun",
+  "summary": "%1 iniciados · %2 ejecuciones evitadas",
+  "brokers": "%1 en línea",
+  "started": "Comandos iniciados",
+  "avoided": "Ejecuciones evitadas",
+  "memory_hits": "Aciertos en caché de memoria",
+  "valkey_hits": "Aciertos en caché de Valkey",
+  "coalesced": "Solicitudes agrupadas",
+  "scope": "Desde el inicio",
+  "activity": "%1 en curso · %2 en cola",
+  "reuseShare": "%1 de %2 solicitudes reutilizaron trabajo",
+  "noActivity": "Aún no hay actividad de comandos"
+}

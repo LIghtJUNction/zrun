@@ -1,0 +1,15 @@
+{
+  "unavailable": "Zrun の統計を取得できません",
+  "waiting": "統計対応のローカル zrun MCP を待機中",
+  "summary": "%1 件起動 · %2 件の重複実行を回避",
+  "brokers": "%1 サービス稼働中",
+  "started": "コマンド起動",
+  "avoided": "重複実行の回避",
+  "memory_hits": "メモリキャッシュのヒット",
+  "valkey_hits": "Valkey キャッシュのヒット",
+  "coalesced": "実行中の処理に統合",
+  "scope": "サービス起動以降",
+  "activity": "処理中 %1 · 待機中 %2",
+  "reuseShare": "処理した %2 件のうち %1 件で再利用",
+  "noActivity": "コマンドの実行はまだありません"
+}

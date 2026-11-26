@@ -9,5 +9,7 @@
   "valkey_hits": "Valkey 快取命中",
   "coalesced": "合併處理中的請求",
   "scope": "自服務啟動以來",
-  "activity": "%1 處理中 · %2 排隊"
+  "activity": "%1 處理中 · %2 排隊",
+  "reuseShare": "已處理 %2 次請求，其中 %1 次重用了結果或執行中的任務",
+  "noActivity": "服務上線，尚無命令活動"
 }

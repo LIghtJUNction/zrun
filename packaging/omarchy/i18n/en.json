@@ -9,5 +9,7 @@
   "valkey_hits": "Valkey cache hits",
   "coalesced": "Requests merged in flight",
   "scope": "Since broker startup",
-  "activity": "%1 active · %2 queued"
+  "activity": "%1 active · %2 queued",
+  "reuseShare": "%1 of %2 handled requests reused work",
+  "noActivity": "No command activity yet"
 }

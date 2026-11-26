@@ -6,6 +6,8 @@ ColumnLayout {
   id: root
 
   readonly property var counters: Stats.online ? Stats.snapshot.counters : null
+  readonly property double avoided: Stats.online ? Stats.snapshot.avoided : 0
+  readonly property double total: counters ? counters.started + avoided : 0
   readonly property color ink: Commons.Color.popups.text
   readonly property color accent: Commons.Color.accent
   readonly property color surface: Commons.Color.popups.background
@@ -57,7 +59,7 @@ ColumnLayout {
       Label {
         Layout.fillWidth: true
         text: root.number(metric.value)
-        color: metric.highlighted ? root.accent : root.ink
+        color: root.ink
         font.pixelSize: Commons.Style.font.body * 2
         font.bold: true
         fontSizeMode: Text.HorizontalFit
@@ -122,6 +124,39 @@ ColumnLayout {
       label: strings.t("avoided")
       value: Stats.online ? Stats.snapshot.avoided : 0
       highlighted: true
+    }
+  }
+
+  ColumnLayout {
+    visible: Stats.online
+    Layout.fillWidth: true
+    spacing: Commons.Style.space(5)
+
+    Rectangle {
+      id: reuseTrack
+      visible: root.total > 0
+      Layout.fillWidth: true
+      Layout.preferredHeight: Commons.Style.space(5)
+      radius: height / 2
+      color: root.tint(root.ink, 0.22)
+
+      Rectangle {
+        anchors.right: parent.right
+        width: root.total > 0 ? parent.width * root.avoided / root.total : 0
+        height: parent.height
+        radius: height / 2
+        color: root.accent
+      }
+    }
+
+    Label {
+      Layout.fillWidth: true
+      wrapMode: Text.Wrap
+      font.pixelSize: Commons.Style.font.bodySmall
+      opacity: 0.84
+      text: root.total > 0
+        ? strings.t("reuseShare").arg(root.number(root.avoided)).arg(root.number(root.total))
+        : strings.t("noActivity")
     }
   }
 
