@@ -221,7 +221,7 @@ with tempfile.TemporaryDirectory() as root:
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(root)
-        os.execve(binary, ['-zrun'], dict(os.environ, HOME=root, ZRUN_PROMPT='plain'))
+        os.execve(binary, ['-zrun'], dict(os.environ, HOME=root, ZRUN_NO_RC='1', ZRUN_PROMPT='plain'))
     pending = b''
     def expect(text):
         global pending
@@ -237,7 +237,8 @@ with tempfile.TemporaryDirectory() as root:
     try:
         expect(b'zrun> ')
         line(b"read -rsp 'Enter key: ' EXAMPLE_KEY; export EXAMPLE_KEY")
-        expect(b'\r\nEnter key: ')
+        expect(b'\r\n')
+        expect(b'Enter key: ')
         assert not termios.tcgetattr(fd)[3] & termios.ECHO
         secret = br'secret with \slash  '
         line(secret)
@@ -246,7 +247,8 @@ with tempfile.TemporaryDirectory() as root:
         expect(secret)
         expect(b'zrun> ')
         line(b"read -rsp 'Cancel key: ' EXAMPLE_KEY")
-        expect(b'\r\nCancel key: ')
+        expect(b'\r\n')
+        expect(b'Cancel key: ')
         os.write(fd, b'\x03')
         expect(b'zrun> ')
         line(b'echo status=$?')
@@ -269,4 +271,80 @@ with tempfile.TemporaryDirectory() as root:
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn type_lists_alias_builtin_and_executables_in_lookup_order() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let dir = std::env::temp_dir().join(format!("zrun-lookup-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    for (subdir, mode) in [("bin1", 0o700), ("ignored", 0o600), ("bin2", 0o700)] {
+        let bin = dir.join(subdir);
+        fs::create_dir(&bin).unwrap();
+        let exe = bin.join("codex");
+        fs::write(&exe, "#!/bin/sh\ntouch SHOULD_NOT_RUN\n").unwrap();
+        fs::set_permissions(exe, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .current_dir(&dir)
+        .env("PATH", "bin1:ignored:bin2")
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", "type -a codex; alias codex=true; whence -aw codex; command -v cd; builtin whence -p codex; PATH=bin2 builtin whence -p codex | /usr/bin/cat; command -v no_such_cmd"])
+        .output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"codex is bin1/codex\ncodex is bin2/codex\ncodex: alias\ncodex: command\ncodex: command\ncd\nbin1/codex\nbin2/codex\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!dir.join("SHOULD_NOT_RUN").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn positional_parameters_and_scalar_attributes_survive_between_commands() {
+    let result = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args([
+            "-c",
+            concat!(
+                "set -- 'two words' three; shift; printf '%s:%s:%s|' \"$0\" \"$#\" \"$1\"; ",
+                "set -a; copied='child value'; set +a; sh -c 'printf %s \"$copied\"'; ",
+                "readonly locked=before; locked=after || printf '|write:%s' \"$?\"; ",
+                "unset locked || printf '|unset:%s' \"$?\"; printf '|%s' \"$locked\"; ",
+                "typeset -x via_type=worked; sh -c 'printf \"|%s\" \"$via_type\"'; ",
+                "set --; shift 0; printf '|%s' \"$#\""
+            ),
+            "fixture",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        result.stdout,
+        b"fixture:1:three|child value|write:1|unset:1|before|worked|0"
+    );
+}
+
+#[test]
+fn directory_stack_uses_session_cwd_and_preserves_it_on_failure() {
+    let result = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .current_dir("/")
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", "pushd /tmp; dirs -lv; pushd +1; pwd; pushd /dir-that-is-deliberately-absent || dirs -lp; popd; chdir /; pwd"])
+        .output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let tmp = std::fs::canonicalize("/tmp").unwrap().display().to_string();
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        format!("0\t{tmp}\n1\t/\n/\n/\n{tmp}\n/\n")
+    );
+}
+
+#[test]
+fn print_and_echo_use_shell_redirections_and_pipeline_state() {
+    let result = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .env("PATH", "/no-external-programs")
+        .env("ZRUN_SHELL", "/missing-backend")
+        .args(["-c", "print -rl -- 'one two' three | read value; echo -n \"$value\"; print -N -- a b; print -r -- 'c\\nd'"])
+        .output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"one twoa\0b\0c\\nd\n");
 }

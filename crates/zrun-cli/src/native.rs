@@ -4,6 +4,8 @@ mod editor;
 mod execute;
 mod highlight;
 mod history;
+mod lookup;
+mod output;
 mod prompt;
 pub(crate) mod rc;
 mod read;
@@ -95,8 +97,10 @@ enum Line {
     Eof,
 }
 const BUILTINS: &[&str] = &[
-    ":", "ai", "alias", "async", "await", "cd", "command", "exec", "exit", "export", "false",
-    "pwd", "read", "shell", "true", "unalias", "unset", "zsh-call",
+    ":", "ai", "alias", "async", "await", "builtin", "bye", "cd", "chdir", "dirs", "popd", "pushd",
+    "command", "exec", "exit", "export", "false", "declare", "echo", "print", "pwd", "read",
+    "readonly", "set", "shift", "shell", "typeset", "true", "type", "unalias", "unset", "whence",
+    "where", "which", "zsh-call",
 ];
 
 struct Session {
