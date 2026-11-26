@@ -4,7 +4,7 @@ zrun 提供独立的 Rust 异步运行时和面向 AI agent 的 Linux 命令执�
 
 运行时的长期目标是成为 Tokio 的替代选项。当前核心提供 **P0 单线程调度器、任务生命周期、定时器和结果通道**，另外通过 `io` feature 提供异步 TCP、Unix socket 和 Unix 文件描述符。单线程可以用 `Runtime::block_on_with_io` 同时推进任务、定时器和 I/O。Tokio 位于独立比较程序，多线程候选 `Pool` 与性能门槛见[阶段计划](docs/plan.md)。
 
-**0.1.0-p0.13** 是 P0 预览版本。Unix 消费者可启用 `process` feature 以启动并监督子进程，通过 zrun reactor 读写管道。多线程 Pool 将任务登记分片，小 Future 和结果槽与任务头共享分配。命令服务支持行内异步命令、Unix socket 和认证 TCP 连接复用。[预览发行说明](docs/releases/0.1.0-p0.13.md) · [当前设计](docs/design.md) · [Linux 实测](docs/measurements/sharded-registry-linux-20261124.md)
+**0.1.0-p0.14** 是 P0 预览版本。原生交互补全可读取系统安装的 Bash 补全定义，无法识别类型的外部参数会留空。Unix 消费者可启用 `process` feature 以启动并监督子进程，通过 zrun reactor 读写管道。多线程 Pool 将任务登记分片，小 Future 和结果槽与任务头共享分配。命令服务支持行内异步命令、Unix socket 和认证 TCP 连接复用。[预览发行说明](docs/releases/0.1.0-p0.14.md) · [当前设计](docs/design.md) · [Linux 实测](docs/measurements/sharded-registry-linux-20261124.md)
 
 
 ## 执行命令
@@ -19,7 +19,7 @@ target/release/zrun run 'printf "%s\n" ready'
 
 运行 `zrun FILE` 可执行 zrun 语法的普通脚本。文件首行的 shebang 可显式选择其他解释器。Linux 上在首行加入 `# zrun:1` 即可用 `async` 提交命名任务，再用 `await` 等待指定任务。设置 `ZRUN_SOCKET` 可让多个脚本共享执行队列和显式复用缓存。
 
-[脚本语法](docs/native-script.md) · [MCP、Unix socket、复用协议和 Project Z 集成](docs/agent-shell.md) · [GitHub 预览发行](https://github.com/LIghtJUNction/zrun/releases/tag/v0.1.0-p0.13)
+[脚本语法](docs/native-script.md) · [MCP、Unix socket、复用协议和 Project Z 集成](docs/agent-shell.md) · [GitHub 预览发行](https://github.com/LIghtJUNction/zrun/releases/tag/v0.1.0-p0.14)
 
 ## 运行一个任务
 

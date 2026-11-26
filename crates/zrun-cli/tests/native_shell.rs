@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as root:
  pid,fd=pty.fork()
  if pid==0:
   os.chdir(root); attrs=termios.tcgetattr(0);attrs[3] &= ~termios.ECHO;termios.tcsetattr(0,termios.TCSANOW,attrs)
-  os.execve(binary,['-zrun'],dict(os.environ,HOME=root,XDG_STATE_HOME=root,ZRUN_NO_RC='1',SHELL='/usr/bin/zsh',ZRUN_SHELL='/missing/configured/backend',ZRUN_PROMPT='plain'))
+  os.execve(binary,['-zrun'],dict(os.environ,HOME=root,XDG_STATE_HOME=root,ZRUN_NO_RC='1',SHELL='/usr/bin/zsh',ZRUN_SHELL='/missing/configured/backend',ZRUN_PROMPT='plain',TERM='xterm-256color'))
  buf=b''
  def expect(text):
   global buf
@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as root:
   os.write(fd,b'\x03');expect(b'zrun> ')
   line('echo signal=$?');expect(b'signal=130\r\n');expect(b'zrun> ')
   line('stty echo; echo EDITOR_READY');expect(b'EDITOR_READY\r\n');expect(b'zrun> ')
-  os.write(fd,b'echo SHOULD_NOT_RUN');expect(b'SHOULD_NOT_RUN');os.write(fd,b'\x03');expect(b'zrun> ')
+  os.write(fd,b'echo SHOULD_NOT_RUN');expect(b'SHOULD_NOT_RUN');os.write(fd,b'\x03');expect(b'\x1b[?2004hzrun> ')
   line("async cleanup -- sh -c 'echo $$ > pid; exec sleep 25'");expect(b'zrun> ')
   deadline=time.monotonic()+5
   while not os.path.exists(root+'/pid') or not os.stat(root+'/pid').st_size:
