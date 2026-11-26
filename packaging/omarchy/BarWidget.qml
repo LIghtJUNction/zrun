@@ -53,7 +53,8 @@ Ui.BarWidget {
     anchorItem: button
     owner: root
     bar: root.bar
-    contentWidth: fittedContentWidth(Commons.Style.space(320))
+    borderColor: details.divider
+    contentWidth: fittedContentWidth(Commons.Style.space(308))
     contentHeight: fittedContentHeight(details.implicitHeight)
 
     Panel {

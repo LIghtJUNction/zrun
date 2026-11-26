@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "lightjunction.zrun",
   "name": "Zrun",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "LIghtJUNction",
   "license": "MIT",
   "description": "Live execution and reuse counters from local zrun MCP brokers.",
