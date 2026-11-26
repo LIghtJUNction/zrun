@@ -1,3 +1,6 @@
+mod directories;
+mod parameters;
+mod script;
 use super::{
     Interrupt, error, read,
     syntax::{self, Link, Part, Program, Redirect, Word},
@@ -19,11 +22,17 @@ use std::{
 #[derive(Clone)]
 pub(super) struct State {
     pub cwd: PathBuf,
+    dirs: Vec<PathBuf>,
     pub env: BTreeMap<OsString, OsString>,
     locals: BTreeMap<String, String>,
+    readonly: std::collections::BTreeSet<String>,
+    all_export: bool,
     pub(super) aliases: BTreeMap<String, (String, Vec<Word>)>,
     pub status: u8,
     pub exit: Option<u8>,
+    returning: Option<u8>,
+    source_depth: usize,
+    eval_depth: usize,
     pub positional: Vec<OsString>,
     pub terminal_handoff: Option<super::terminal_resume::Handoff>,
 }
@@ -35,11 +44,17 @@ impl State {
         env.insert("PWD".into(), cwd.as_os_str().into());
         Ok(Self {
             cwd,
+            dirs: Vec::new(),
             env,
             locals: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            readonly: Default::default(),
+            all_export: false,
             status: 0,
             exit: None,
+            returning: None,
+            source_depth: 0,
+            eval_depth: 0,
             positional: vec!["zrun".into()],
             terminal_handoff: None,
         })
@@ -76,11 +91,15 @@ impl State {
         }
         s
     }
-    fn assign(&mut self, k: &str, v: String, export: bool) {
-        if export || self.env.contains_key(OsStr::new(k)) {
+    fn assign(&mut self, k: &str, v: String, export: bool) -> io::Result<()> {
+        if self.readonly.contains(k) {
+            return Err(error(format!("{k}: readonly variable")));
+        }
+        if self.all_export || export || self.env.contains_key(OsStr::new(k)) {
             self.env.insert(k.into(), v.clone().into());
         }
         self.locals.insert(k.into(), v);
+        Ok(())
     }
     fn change_directory(&mut self, arg: &Path) -> io::Result<()> {
         let next = self.cwd.join(arg).canonicalize()?;
@@ -138,17 +157,7 @@ impl State {
         if !directory.is_dir() {
             return Ok(false);
         }
-        let is_command = |path: &Path| path.is_file() && super::complete::executable(path);
-        let command_exists = if name.contains('/') {
-            is_command(&self.cwd.join(&name))
-        } else {
-            let path = self
-                .env
-                .get(OsStr::new("PATH"))
-                .map_or(OsStr::new("/bin:/usr/bin"), |v| v.as_os_str());
-            std::env::split_paths(path).any(|dir| is_command(&self.cwd.join(dir).join(&name)))
-        };
-        if command_exists {
+        if super::lookup::paths(self, &name, false).next().is_some() {
             return Ok(false);
         }
         self.change_directory(&directory)?;
@@ -158,6 +167,8 @@ impl State {
         &mut self,
         argv: &[String],
         streams: &mut Streams,
+        control: &Arc<Control>,
+        tty: bool,
         signal: Option<&Interrupt>,
     ) -> io::Result<Option<u8>> {
         let Some((name, args)) = argv.split_first() else {
@@ -165,9 +176,16 @@ impl State {
         };
         let out = &mut streams.out;
         let code = match name.as_str() {
+            query if super::lookup::is_query(query) => {
+                super::lookup::describe(self, argv, streams)?
+            }
+            "printf" => super::output::printf(args, out, &mut streams.err)?,
+            "echo" | "print" => super::output::print(name, args, out)?,
+            "test" | "[" => super::condition::test(name, args, &self.cwd, &mut streams.err)?,
             ":" | "true" => 0,
             "false" => 1,
-            "exit" => {
+            "." | "source" | "eval" => self.evaluate(argv, streams, control, tty, signal)?,
+            "exit" | "bye" | "return" => {
                 if args.len() > 1 {
                     return Err(error("exit [STATUS]"));
                 }
@@ -177,10 +195,15 @@ impl State {
                         .parse::<u8>()
                         .map_err(|_| error("exit needs a status in 0..255"))?,
                 };
-                self.exit = Some(code);
+                if name == "return" && self.source_depth > 0 {
+                    self.returning = Some(code);
+                } else {
+                    self.exit = Some(code);
+                }
                 code
             }
-            "cd" => {
+            "dirs" | "pushd" | "popd" => self.directory_stack(name, args, out)?,
+            "cd" | "chdir" => {
                 if args.len() > 1 {
                     return Err(error("cd [DIRECTORY]"));
                 }
@@ -249,28 +272,22 @@ impl State {
             "read" => {
                 let result = read::line(args, &mut streams.input, &mut streams.err, signal)?;
                 if let Some((name, value)) = result.assignment {
-                    self.assign(name, value, false);
+                    self.assign(name, value, false)?;
                 }
                 result.status
             }
-            "export" | "unset" => {
+            "set" => self.set_parameters(args, out)?,
+            "shift" => self.shift_parameters(args)?,
+            "readonly" | "export" | "typeset" | "declare" => {
+                self.declare_variables(name, args, out)?
+            }
+            "unset" => {
                 for entry in args {
-                    let (k, v) = entry
-                        .split_once('=')
-                        .map_or((entry.as_str(), None), |(k, v)| (k, Some(v)));
-                    if !syntax::identifier(k) || name == "unset" && v.is_some() {
-                        return Err(error(format!("{name}: invalid variable name")));
+                    if !syntax::identifier(entry) || self.readonly.contains(entry) {
+                        return Err(error(format!("unset: cannot unset {entry}")));
                     }
-                    if name == "unset" {
-                        self.locals.remove(k);
-                        self.env.remove(OsStr::new(k));
-                    } else {
-                        self.assign(
-                            k,
-                            v.map(str::to_owned).unwrap_or_else(|| self.lookup(k)),
-                            true,
-                        );
-                    }
+                    self.locals.remove(entry);
+                    self.env.remove(OsStr::new(entry));
                 }
                 0
             }
@@ -414,7 +431,7 @@ fn pipeline(
     state: &mut State,
     cmds: &[syntax::Command],
     base: &Streams,
-    control: &Control,
+    control: &Arc<Control>,
     tty: bool,
     signal: Option<&Interrupt>,
 ) -> io::Result<u8> {
@@ -425,6 +442,8 @@ fn pipeline(
         restore: None,
         control,
     };
+    let mut writers = Vec::new();
+    let mut last_builtin = None;
     let mut input = None;
     let mut exits = false;
     // Noninteractive foreground commands inherit the caller's process group so
@@ -479,6 +498,7 @@ fn pipeline(
         let mut args = &words[n..];
         if let Some((name, rest)) = args.split_first()
             && name != "command"
+            && name != "builtin"
             && name != "exec"
             && let Some((_, definition)) = state.aliases.get(name)
         {
@@ -490,27 +510,105 @@ fn pipeline(
             args = &expansion;
         }
         let replaces_shell = args.first().is_some_and(|s| s == "exec");
-        if args.first().is_some_and(|s| s == "exec" || s == "command") {
-            args = &args[1..];
+        let mut standard_path = false;
+        let mut builtin_only = false;
+        loop {
+            match args.split_first() {
+                Some((name, rest)) if name == "builtin" => {
+                    builtin_only = true;
+                    args = if rest.first().is_some_and(|v| v == "--") {
+                        &rest[1..]
+                    } else {
+                        rest
+                    };
+                }
+                Some((name, rest)) if name == "command" => {
+                    let flags = rest
+                        .iter()
+                        .take_while(|v| v.starts_with('-') && v.as_str() != "--");
+                    if flags.clone().any(|v| v.bytes().skip(1).any(|b| b != b'p')) {
+                        break;
+                    }
+                    let nflags = flags.count();
+                    standard_path |= nflags > 0;
+                    args = &rest[nflags..];
+                    if args.first().is_some_and(|v| v == "--") {
+                        args = &args[1..];
+                    }
+                }
+                Some((name, rest)) if name == "exec" => {
+                    args = rest;
+                    break;
+                }
+                _ => break,
+            }
         }
         if cmds.len() == 1 && replaces_shell && !args.is_empty() {
             exits = true;
         }
         if args.is_empty() && cmds.len() == 1 {
             for (k, v) in assignments {
-                state.assign(k, v.into(), false);
+                state.assign(k, v.into(), false)?;
             }
             return Ok(0);
         }
+        // A non-final builtin may fill a pipe before the following command starts.
+        // Writers own a private session. The final builtin can update the parent.
+        let native = args.first().is_some_and(|name| {
+            super::BUILTINS.contains(&name.as_str())
+                && !matches!(
+                    name.as_str(),
+                    "ai" | "zsh-call" | "async" | "await" | "shell" | "exec" | "builtin"
+                )
+        });
+        if native && (cmds.len() > 1 || n > 0) {
+            if last && n == 0 {
+                let code = state
+                    .builtin(args, &mut streams, control, tty, signal)?
+                    .expect("native builtin");
+                last_builtin = Some(code);
+                continue;
+            }
+            let mut session = state.clone();
+            for (key, value) in assignments {
+                session.assign(key, value.to_owned(), true)?;
+            }
+            let argv = args.to_vec();
+            let stage_control = if last {
+                control.clone()
+            } else {
+                Arc::new(Control::background())
+            };
+            let mut run = move || -> io::Result<u8> {
+                match session.builtin(&argv, &mut streams, &stage_control, false, None) {
+                    Ok(Some(code)) => Ok(code),
+                    Ok(None) => Err(error("invalid builtin dispatch")),
+                    Err(e) => {
+                        writeln!(streams.err, "zrun: {e}")?;
+                        Ok(1)
+                    }
+                }
+            };
+            if last {
+                last_builtin = Some(run()?);
+            } else {
+                writers.push(std::thread::Builder::new().spawn(run)?);
+            }
+            continue;
+        }
         if cmds.len() == 1
             && n == 0
-            && let Some(code) = state.builtin(args, &mut streams, signal)?
+            && let Some(code) = state.builtin(args, &mut streams, control, tty, signal)?
         {
             return Ok(code);
         }
         let Some((name, rest)) = args.split_first() else {
             return Err(error("expected an executable in pipeline"));
         };
+        if builtin_only {
+            writeln!(streams.err, "builtin: {name}: not a shell builtin")?;
+            return Ok(1);
+        }
         // PATH lookup follows the session's exported environment, even after cd and export.
         let mut forwarded = rest;
         let mut cmd = if name == "zsh-call"
@@ -554,6 +652,9 @@ fn pipeline(
             .stdin(Stdio::from(streams.input))
             .stdout(Stdio::from(streams.out))
             .stderr(Stdio::from(streams.err.try_clone()?));
+        if standard_path {
+            cmd.env("PATH", "/bin:/usr/bin");
+        }
         if owns_group {
             cmd.process_group(pipeline.group);
         }
@@ -599,6 +700,14 @@ fn pipeline(
         code = status(exit);
     }
     pipeline.children.clear();
+    for writer in writers {
+        writer
+            .join()
+            .map_err(|_| error("builtin pipeline stage panicked"))??;
+    }
+    if let Some(last) = last_builtin {
+        code = last;
+    }
     if exits {
         state.exit = Some(code);
     }
@@ -626,6 +735,7 @@ pub(super) fn execute(
             }
         };
         if state.exit.is_some()
+            || state.returning.is_some()
             || signal.is_some_and(|signal| {
                 signal.terminate.load(std::sync::atomic::Ordering::SeqCst) != 0
             })
