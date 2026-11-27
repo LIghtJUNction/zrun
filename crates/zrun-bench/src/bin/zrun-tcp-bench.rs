@@ -318,7 +318,7 @@ fn run(args: &[String]) -> Result<()> {
             emit(&json!({
                 "phase":"finished", "engine":endpoint, "workers":workers,
                 "workload":work.record(), "build":build(), "messages":work.all_messages(),
-                "cpu_ticks":elapsed_ticks(started),
+                "cpu_ticks":elapsed_ticks(started), "peak_rss_bytes":zrun_bench::peak_rss_bytes(),
             }))
         }
         ("client", addr) => {

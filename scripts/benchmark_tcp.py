@@ -98,6 +98,7 @@ def validate_result(args, case, workers, engine, client, server):
     return {
         "status": "ok", "profile": client["build"]["profile"],
         "messages": client["messages"], "elapsed_ns": elapsed, "latency_samples": len(latency),
+        "server_peak_rss_bytes": server.get("peak_rss_bytes"),
         "server_cpu_ticks": server["cpu_ticks"], "client_cpu_ticks": client["cpu_ticks"],
         "metrics": {
             "tcp_bytes_per_second": connections * rounds * payload * 1e9 / elapsed,

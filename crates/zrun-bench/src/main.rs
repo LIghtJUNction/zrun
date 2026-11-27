@@ -43,7 +43,7 @@ impl Config {
         while let Some(key) = args.next() {
             if key == "--help" {
                 println!(
-                    "zrun-bench --engine zrun|tokio --scenario spawn_join|batch_join|yield|wake_latency|external_wake_latency|batch_external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
+                    "zrun-bench --engine zrun|tokio --scenario spawn_join|contended_spawn|batch_join|yield|wake_latency|external_wake_latency|batch_external_wake_latency|pending_memory|idle|soak --tasks 1..1000000 --workers 1|2|4|8|16 [--yields 16] [--latency-samples 10000] [--hold-ms 20] [--duration-secs N --sample-interval-ms 1000]"
                 );
                 std::process::exit(0);
             }
@@ -74,6 +74,7 @@ impl Config {
         }
         if ![
             "spawn_join",
+            "contended_spawn",
             "batch_join",
             "yield",
             "wake_latency",
@@ -104,6 +105,10 @@ impl Config {
             return Err("soak requires explicit --duration-secs in 1..604800".into());
         }
         Ok(c)
+    }
+
+    fn current_thread(&self) -> bool {
+        self.workers == 1 && !matches!(self.scenario.as_str(), "batch_join" | "contended_spawn")
     }
 
     fn record(&self, status: &str) -> Value {
@@ -166,8 +171,8 @@ impl<T> Future for TokioJoin<T> {
     }
 }
 
-trait Engine: Sized {
-    type Handle<T>: Future<Output = Result<T, String>> + Unpin + Abort
+trait Engine: Sized + Sync {
+    type Handle<T>: Future<Output = Result<T, String>> + Unpin + Abort + Send
     where
         T: Send + 'static;
     fn new(config: &Config) -> Result<Self, String>;
@@ -257,7 +262,7 @@ impl Engine for tokio::runtime::Runtime {
     where
         T: Send + 'static;
     fn new(config: &Config) -> Result<Self, String> {
-        let mut builder = if config.workers == 1 && config.scenario != "batch_join" {
+        let mut builder = if config.current_thread() {
             tokio::runtime::Builder::new_current_thread()
         } else {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -323,6 +328,11 @@ impl Future for WakeWork {
 
 type WakeSample = (usize, Option<u64>);
 
+fn sample_index(index: usize, count: usize, tasks: usize) -> bool {
+    let (i, n, total) = (index as u64, count as u64, tasks as u64);
+    i * n / total != (i + 1) * n / total
+}
+
 struct ExternalWake {
     index: usize,
     sampled: bool,
@@ -381,7 +391,7 @@ fn external_wake_samples<E: Engine>(
     for index in 0..tasks {
         handles.push(runtime.spawn(ExternalWake {
             index,
-            sampled: index * count / tasks != (index + 1) * count / tasks,
+            sampled: sample_index(index, count, tasks),
             signal: Arc::new(OnceLock::new()),
             register: Some(register.clone()),
         })?);
@@ -418,7 +428,7 @@ fn batch_external_wake_samples<E: Engine>(
         .map_err(|error| error.to_string())?;
     let handles = runtime.spawn_batch((0..tasks).map(|index| ExternalWake {
         index,
-        sampled: index * count / tasks != (index + 1) * count / tasks,
+        sampled: sample_index(index, count, tasks),
         signal: Arc::new(OnceLock::new()),
         register: Some(register.clone()),
     }));
@@ -453,6 +463,47 @@ fn join_wake_samples<E: Engine>(
         return Err("missing latency samples".into());
     }
     Ok(samples)
+}
+
+// Producers use disjoint contiguous indices so the ordinary ordered join
+// verifies every result, including remainder tasks when N is not divisible by 4.
+const PRODUCERS: usize = 4;
+
+fn contended_spawn<E: Engine>(
+    runtime: &mut E,
+    tasks: usize,
+    count: usize,
+) -> Result<(Vec<u64>, Duration), String> {
+    let start_gate = std::sync::Barrier::new(PRODUCERS + 1);
+    let shared: &E = runtime;
+    let (started, handles) = std::thread::scope(|scope| {
+        let mut threads = Vec::with_capacity(PRODUCERS);
+        for producer in 0..PRODUCERS {
+            let range = producer * tasks / PRODUCERS..(producer + 1) * tasks / PRODUCERS;
+            let gate = &start_gate;
+            threads.push(scope.spawn(move || {
+                let mut handles = Vec::with_capacity(range.len());
+                gate.wait();
+                for index in range {
+                    let sampled = sample_index(index, count, tasks);
+                    let submitted = sampled.then(Instant::now);
+                    handles.push(shared.spawn(async move {
+                        (index, submitted.map(|s| s.elapsed().as_nanos() as u64))
+                    })?);
+                }
+                Ok::<_, String>(handles)
+            }));
+        }
+        let mut handles = Vec::with_capacity(tasks);
+        let started = Instant::now();
+        start_gate.wait();
+        for thread in threads {
+            handles.extend(thread.join().map_err(|_| "spawn producer panicked")??);
+        }
+        Ok::<_, String>((started, handles))
+    })?;
+    let samples = join_wake_samples(runtime, handles, count)?;
+    Ok((samples, started.elapsed()))
 }
 
 struct PendingWork {
@@ -677,6 +728,17 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
             let ns = started.elapsed().as_nanos().max(1) as u64;
             metrics = json!({"elapsed_ns": ns, "spawn_join_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64});
         }
+        "contended_spawn" => {
+            let count = c.tasks.min(c.latency_samples);
+            let (mut samples, elapsed) = contended_spawn(&mut rt, c.tasks, count)?;
+            let ns = elapsed.as_nanos().max(1) as u64;
+            checksum = c.tasks as u64 * (c.tasks as u64 - 1) / 2; // join verified each index
+            metrics = json!({"elapsed_ns": ns, "contended_spawn_ops_per_sec": c.tasks as f64 * 1e9 / ns as f64,
+                "contended_spawn_p50_ns": percentile(&mut samples, 0.50),
+                "contended_spawn_p99_ns": percentile(&mut samples, 0.99)});
+            result["producers"] = json!(PRODUCERS);
+            result["latency_samples_ns"] = json!(samples);
+        }
         "batch_join" => {
             let started = Instant::now();
             let handles = rt.spawn_batch((0..c.tasks).map(|index| YieldWork {
@@ -729,7 +791,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
             } else {
                 let mut handles = Vec::with_capacity(c.tasks);
                 for index in 0..c.tasks {
-                    let sampled = index * count / c.tasks != (index + 1) * count / c.tasks;
+                    let sampled = sample_index(index, count, c.tasks);
                     handles.push(rt.spawn(WakeWork {
                         index,
                         sampled,
@@ -808,6 +870,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
     result["completed_tasks"] = json!(completed);
     result["checksum"] = json!(checksum);
     result["active_tasks"] = json!(rt.alive());
+    result["peak_rss_bytes"] = json!(zrun_bench::peak_rss_bytes());
     result["process_rss"] = process_rss;
     result["runtime_rss"] = runtime_rss;
     Ok(result)
@@ -822,7 +885,7 @@ fn main() {
         }
     };
     let result = match (c.engine.as_str(), c.workers) {
-        ("zrun", 1) if c.scenario != "batch_join" => run::<zrun::Runtime>(&c),
+        ("zrun", 1) if c.current_thread() => run::<zrun::Runtime>(&c),
         ("zrun", _) => run::<zrun::Pool>(&c),
         _ => run::<tokio::runtime::Runtime>(&c),
     };

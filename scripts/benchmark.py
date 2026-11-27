@@ -24,10 +24,12 @@ import tomllib
 import unittest
 
 DEFAULT_SCENARIOS = ("spawn_join", "yield", "wake_latency", "external_wake_latency", "pending_memory", "idle")
-SCENARIOS = (*DEFAULT_SCENARIOS, "batch_join", "batch_external_wake_latency")
+SCENARIOS = (*DEFAULT_SCENARIOS, "contended_spawn", "batch_join", "batch_external_wake_latency")
 TASK_SCALES = (1000, 10000, 100000, 1000000)
 WORKERS = (1, 2, 4, 8, 16)
 METRICS = {
+    "contended_spawn_ops_per_sec": ("contended_spawn", "higher", 1.20, 2.00, "tasks/s"),
+    "contended_spawn_p99_ns": ("contended_spawn", "lower", 1.00, 0.70, "ns"),
     "batch_join_ops_per_sec": ("batch_join", "higher", 1.20, 2.00, "tasks/s"),
     "spawn_join_ops_per_sec": ("spawn_join", "higher", 1.20, 2.00, "tasks/s"),
     "wake_ops_per_sec": ("yield", "higher", 1.20, 2.00, "wakes/s"),
@@ -284,7 +286,7 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
     for key, expected in {"yields": yields, "latency_samples": latency_samples, "hold_ms": hold_ms}.items():
         if config.get(key) != expected:
             return f"configuration mismatch: {key}"
-    if scenario in ("spawn_join", "batch_join", "yield", "wake_latency", "external_wake_latency", "batch_external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
+    if scenario in ("spawn_join", "contended_spawn", "batch_join", "yield", "wake_latency", "external_wake_latency", "batch_external_wake_latency") and raw.get("checksum") != tasks * (tasks - 1) // 2:
         return "checksum mismatch"
     if scenario == "pending_memory" and (raw.get("pending_polled_tasks") != tasks or raw.get("cancelled_tasks") != tasks):
         return "pending task accounting mismatch"
@@ -310,11 +312,19 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
             or not math.isclose(per_wake, cpu / (tasks * yields), rel_tol=1e-12)
         ):
             return "invalid CPU measurement or wake count"
+    if scenario == "contended_spawn":
+        metrics = raw["metrics"]
+        elapsed = metrics.get("elapsed_ns")
+        throughput = metrics.get("contended_spawn_ops_per_sec")
+        if (raw.get("producers") != 4 or not finite_number(elapsed) or elapsed <= 0
+                or not finite_number(throughput)
+                or not math.isclose(throughput, tasks * 1e9 / elapsed, rel_tol=1e-12)):
+            return "invalid contended spawn timing"
     if scenario == "batch_external_wake_latency":
         overlapping = raw.get("wakes_started_before_submission_returned")
         if type(overlapping) is not int or not 0 < overlapping <= tasks:
             return "no verified overlap of submission and external wakes"
-    if scenario in ("wake_latency", "external_wake_latency", "batch_external_wake_latency"):
+    if scenario in ("contended_spawn", "wake_latency", "external_wake_latency", "batch_external_wake_latency"):
         values = raw.get("latency_samples_ns")
         if not isinstance(values, list) or len(values) != min(tasks, latency_samples) or not all(finite_number(v) and v >= 0 for v in values):
             return "invalid raw latency samples"
