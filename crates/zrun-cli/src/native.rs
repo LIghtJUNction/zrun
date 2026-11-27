@@ -208,6 +208,7 @@ impl Session {
 }
 pub(super) fn interactive() -> io::Result<u8> {
     let mut session = Session::new(vec![])?;
+    session.state.expansion_exit = None;
     session.startup();
     if let Some(code) = session.state.exit {
         return Ok(code);
@@ -253,13 +254,15 @@ pub(super) fn command(script: &OsStr, args: Vec<OsString>, interactive_rc: bool)
         .to_str()
         .ok_or_else(|| error("native command is not UTF-8"))?;
     let mut session = Session::new(args)?;
+    session.state.expansion_exit = Some(127);
     if interactive_rc {
         session.startup();
         if let Some(code) = session.state.exit {
             return Ok(code);
         }
     }
-    for line in script.lines() {
+    for (index, line) in script.lines().enumerate() {
+        session.state.line_number = index + 1;
         session.line(line, io::stdin().is_terminal(), None)?;
         if let Some(exit) = session.state.exit {
             return Ok(exit);
@@ -272,6 +275,7 @@ pub(super) fn source(input: impl BufRead, args: Vec<OsString>) -> io::Result<u8>
     let mut session = Session::new(args)?;
     stream_lines(input, |line| {
         session.line(line, io::stdin().is_terminal(), None)?;
+        session.state.line_number += 1;
         Ok(session.state.exit.is_none())
     })?;
     Ok(session.state.exit.unwrap_or(session.state.status))

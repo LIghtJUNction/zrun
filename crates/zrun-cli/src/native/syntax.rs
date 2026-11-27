@@ -6,6 +6,15 @@ use std::io;
 pub(super) enum Part {
     Text(String),
     Var(String),
+    Default {
+        name: String,
+        value: String,
+        if_empty: bool,
+    },
+    Trim {
+        name: String,
+        suffix: String,
+    },
 }
 pub(super) type Word = Vec<Part>;
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +62,51 @@ pub(super) fn identifier(s: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
         && ch.all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
+fn parameter_name(s: &str) -> bool {
+    identifier(s)
+        || (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+        || matches!(s, "?" | "$" | "@" | "#")
+}
+
+fn braced_parameter(s: &str) -> io::Result<Part> {
+    if parameter_name(s) {
+        return Ok(Part::Var(s.to_owned()));
+    }
+    let operator = s.find([':', '-', '%']);
+    if let Some(at) = operator {
+        let (name, tail) = s.split_at(at);
+        let (op, value) = if let Some(value) = tail.strip_prefix(":-") {
+            (":-", value)
+        } else if let Some(value) = tail.strip_prefix("%%") {
+            ("%", value)
+        } else {
+            tail.split_at(1)
+        };
+        // Keep unsupported quoting, nested expansion and glob patterns explicit.
+        if parameter_name(name)
+            && !value.contains(['$', '\\', '\'', '"', '\u{60}', '{', '}', '*', '?', '[', ']'])
+        {
+            match op {
+                "-" | ":-" => {
+                    return Ok(Part::Default {
+                        name: name.to_owned(),
+                        value: value.to_owned(),
+                        if_empty: op == ":-",
+                    });
+                }
+                "%" => {
+                    return Ok(Part::Trim {
+                        name: name.to_owned(),
+                        suffix: value.to_owned(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Err(error("unsupported parameter expansion"))
+}
+
 fn variable(chars: &[char], at: &mut usize, word: &mut Word) -> io::Result<()> {
     let start = *at;
     let name = match chars.get(*at) {
@@ -71,13 +125,8 @@ fn variable(chars: &[char], at: &mut usize, word: &mut Word) -> io::Result<()> {
             }
             let s: String = chars[first..*at].iter().collect();
             *at += 1;
-            if !identifier(&s)
-                && s.parse::<usize>().is_err()
-                && !matches!(s.as_str(), "?" | "$" | "@" | "#")
-            {
-                return Err(error("unsupported parameter expansion"));
-            }
-            s
+            word.push(braced_parameter(&s)?);
+            return Ok(());
         }
         Some('(') => {
             return Err(error(

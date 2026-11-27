@@ -447,3 +447,24 @@ fn a_missing_pipeline_stage_preserves_the_other_stage_and_its_status() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("missing-stage"));
     }
 }
+
+#[test]
+fn nounset_fails_before_creating_redirections() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .args([
+            "-c",
+            r#"set -u
+printf '%s' "$ZRUN_MISSING_FIXTURE" >/zrun-test/missing-directory/out || printf bad
+printf bad"#,
+            "fixture",
+        ])
+        .env_remove("ZRUN_MISSING_FIXTURE")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(127), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"fixture: line 2: ZRUN_MISSING_FIXTURE: unbound variable\n"
+    );
+}

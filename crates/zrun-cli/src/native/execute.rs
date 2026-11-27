@@ -30,6 +30,9 @@ pub(super) struct State {
     errexit: bool,
     ignore_errexit: bool,
     pipefail: bool,
+    nounset: bool,
+    pub(super) expansion_exit: Option<u8>,
+    pub(super) line_number: usize,
     pub(super) aliases: BTreeMap<String, (String, Vec<Word>)>,
     pub status: u8,
     pub exit: Option<u8>,
@@ -39,6 +42,16 @@ pub(super) struct State {
     pub positional: Vec<OsString>,
     pub terminal_handoff: Option<super::terminal_resume::Handoff>,
 }
+#[derive(Debug)]
+struct UnboundVariable(String);
+
+impl std::fmt::Display for UnboundVariable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: unbound variable", self.0)
+    }
+}
+impl std::error::Error for UnboundVariable {}
+
 impl State {
     pub fn new() -> io::Result<Self> {
         let cwd = std::env::current_dir()?;
@@ -56,6 +69,9 @@ impl State {
             errexit: false,
             ignore_errexit: false,
             pipefail: false,
+            nounset: false,
+            expansion_exit: Some(1),
+            line_number: 1,
             status: 0,
             exit: None,
             returning: None,
@@ -66,36 +82,69 @@ impl State {
         })
     }
     fn lookup(&self, k: &str) -> String {
+        self.value(k).unwrap_or_default()
+    }
+    fn value(&self, k: &str) -> Option<String> {
         match k {
-            "?" => self.status.to_string(),
-            "#" => self.positional.len().saturating_sub(1).to_string(),
-            "$" => std::process::id().to_string(),
-            k if k.parse::<usize>().is_ok() => self
-                .positional
-                .get(k.parse::<usize>().unwrap())
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            _ => self
-                .locals
-                .get(k)
-                .cloned()
-                .or_else(|| {
-                    self.env
-                        .get(OsStr::new(k))
-                        .map(|v| v.to_string_lossy().into_owned())
-                })
-                .unwrap_or_default(),
+            "?" => Some(self.status.to_string()),
+            "#" => Some(self.positional.len().saturating_sub(1).to_string()),
+            "$" => Some(std::process::id().to_string()),
+            "@" => Some(
+                self.positional
+                    .iter()
+                    .skip(1)
+                    .map(|v| v.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            k if k.bytes().all(|b| b.is_ascii_digit()) => k
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| self.positional.get(index))
+                .map(|s| s.to_string_lossy().into_owned()),
+            _ => self.locals.get(k).cloned().or_else(|| {
+                self.env
+                    .get(OsStr::new(k))
+                    .map(|v| v.to_string_lossy().into_owned())
+            }),
         }
     }
-    fn word(&self, w: &Word) -> String {
-        let mut s = String::new();
-        for p in w {
-            match p {
-                Part::Text(t) => s.push_str(t),
-                Part::Var(k) => s.push_str(&self.lookup(k)),
+    fn expand(&self, name: &str) -> io::Result<String> {
+        match self.value(name) {
+            Some(value) => Ok(value),
+            None if self.nounset => Err(io::Error::other(UnboundVariable(name.to_owned()))),
+            None => Ok(String::new()),
+        }
+    }
+    fn word(&self, word: &Word) -> io::Result<String> {
+        let mut expanded = String::new();
+        for part in word {
+            match part {
+                Part::Text(text) => expanded.push_str(text),
+                Part::Var(name) => expanded.push_str(&self.expand(name)?),
+                Part::Default {
+                    name,
+                    value,
+                    if_empty,
+                } => {
+                    let found = self.value(name).filter(|v| !if_empty || !v.is_empty());
+                    expanded.push_str(found.as_deref().unwrap_or(value));
+                }
+                Part::Trim { name, suffix } => {
+                    let value = self.expand(name)?;
+                    expanded.push_str(value.strip_suffix(suffix).unwrap_or(&value));
+                }
             }
         }
-        s
+        Ok(expanded)
+    }
+    fn report_unbound(&self, error: &io::Error, err: &File) -> io::Result<()> {
+        writeln!(
+            &*err,
+            "{}: line {}: {error}",
+            self.positional[0].to_string_lossy(),
+            self.line_number
+        )
     }
     fn assign(&mut self, k: &str, v: String, export: bool) -> io::Result<()> {
         if self.readonly.contains(k) {
@@ -133,7 +182,9 @@ impl State {
         if command.negated || !command.redirects.is_empty() {
             return Ok(false);
         }
-        let name = self.word(first);
+        let Ok(name) = self.word(first) else {
+            return Ok(false);
+        };
         if name.is_empty()
             || super::BUILTINS.contains(&name.as_str())
             || self.aliases.contains_key(&name)
@@ -467,23 +518,6 @@ fn pipeline(
             input = Some(File::from(OwnedFd::from(r)));
             streams.out = File::from(OwnedFd::from(w));
         }
-        for (op, path) in &ast.redirects {
-            streams.redirect(*op, &state.cwd.join(state.word(path)))?;
-        }
-        let mut words = Vec::new();
-        for w in &ast.words {
-            if matches!(w.as_slice(),[Part::Var(name)] if name=="@") {
-                words.extend(
-                    state
-                        .positional
-                        .iter()
-                        .skip(1)
-                        .map(|v| v.to_string_lossy().into_owned()),
-                );
-            } else {
-                words.push(state.word(w));
-            }
-        }
         let n = ast
             .words
             .iter()
@@ -496,26 +530,53 @@ fn pipeline(
                     .is_some_and(|(name, _)| syntax::identifier(name))
             })
             .count();
+        let mut expand = || -> io::Result<Vec<String>> {
+            let mut words = Vec::new();
+            for w in &ast.words {
+                if matches!(w.as_slice(), [Part::Var(name)] if name == "@") {
+                    words.extend(
+                        state
+                            .positional
+                            .iter()
+                            .skip(1)
+                            .map(|v| v.to_string_lossy().into_owned()),
+                    );
+                } else {
+                    words.push(state.word(w)?);
+                }
+            }
+            // Explicit command/exec bypass aliases. Expand alias arguments before
+            // opening any redirection, just like the original command arguments.
+            if let Some(name) = words.get(n)
+                && !matches!(name.as_str(), "command" | "builtin" | "exec")
+                && let Some((_, definition)) = state.aliases.get(name)
+            {
+                let expansion = definition
+                    .iter()
+                    .map(|word| state.word(word))
+                    .collect::<io::Result<Vec<_>>>()?;
+                words.splice(n..=n, expansion);
+            }
+            for (op, path) in &ast.redirects {
+                streams.redirect(*op, &state.cwd.join(state.word(path)?))?;
+            }
+            Ok(words)
+        };
+        let words = match expand() {
+            Ok(expanded) => expanded,
+            Err(error)
+                if cmds.len() > 1 && error.get_ref().is_some_and(|e| e.is::<UnboundVariable>()) =>
+            {
+                state.report_unbound(&error, &streams.err)?;
+                statuses[i] = state.expansion_exit.unwrap_or(1);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let assignments = words[..n]
             .iter()
-            .map(|w| w.split_once('=').expect("validated assignment"));
-        // Explicit command/exec bypass aliases. Alias words are expanded in this
-        // session and the caller's remaining argv retain their original boundaries.
-        let expansion;
+            .map(|word| word.split_once('=').expect("validated assignment"));
         let mut args = &words[n..];
-        if let Some((name, rest)) = args.split_first()
-            && name != "command"
-            && name != "builtin"
-            && name != "exec"
-            && let Some((_, definition)) = state.aliases.get(name)
-        {
-            expansion = definition
-                .iter()
-                .map(|w| state.word(w))
-                .chain(rest.iter().cloned())
-                .collect::<Vec<_>>();
-            args = &expansion;
-        }
         let replaces_shell = args.first().is_some_and(|s| s == "exec");
         let mut standard_path = false;
         let mut builtin_only = false;
@@ -749,6 +810,17 @@ pub(super) fn execute(
             negated || lists.peek().is_some_and(|(link, _)| *link != Link::Always);
         state.status = match pipeline(state, cmds, streams, control, tty, signal) {
             Ok(s) => s,
+            Err(e)
+                if e.get_ref()
+                    .is_some_and(|source| source.is::<UnboundVariable>()) =>
+            {
+                let _ = state.report_unbound(&e, &streams.err);
+                let code = state.expansion_exit.unwrap_or(1);
+                state.exit = state.expansion_exit;
+                state.ignore_errexit = previous;
+                state.status = code;
+                return code;
+            }
             Err(e) => {
                 let _ = writeln!(&streams.err, "zrun: {e}");
                 1

@@ -40,6 +40,7 @@ impl State {
                 match flag {
                     'a' => self.all_export = enabled,
                     'e' => self.errexit = enabled,
+                    'u' => self.nounset = enabled,
                     'o' => {
                         let Some((name, remaining)) = rest.split_first() else {
                             return Err(error("set: expected an option name"));
@@ -48,6 +49,7 @@ impl State {
                             "allexport" => self.all_export = enabled,
                             "errexit" => self.errexit = enabled,
                             "pipefail" => self.pipefail = enabled,
+                            "nounset" => self.nounset = enabled,
                             _ => return Err(error(format!("set: unsupported option {name}"))),
                         }
                         rest = remaining;

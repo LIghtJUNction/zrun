@@ -24,6 +24,12 @@ CASES = {
     "errexit negated command": """set -e; ! true; printf alive""",
     "errexit double negation": """set -e; ! ! false; printf alive""",
     "nounset": """set -u; printf '<%s>\\n' "$UNSET_PROBE" """,
+    "nounset aborts the list": """set -u; printf '%s' "$UNSET_PROBE" || printf bad; printf bad""",
+    "nounset distinguishes empty and unset": """set -o nounset; v=; printf '<%s>' "$v"; set +u; printf '<%s>' "$UNSET_PROBE" """,
+    "nounset failure is local to a pipeline stage": """set -uo pipefail; printf '%s' "$UNSET_PROBE" | true; printf '%s' "$?" """,
+    "nounset defaults and literal suffix": """set -u; v=; x=a.txt; printf '%s:%s:%s:%s' "${v-fallback}" "${v:-fallback}" "${UNSET_PROBE-fallback}" "${x%%.txt}" """,
+    "nounset line number": """set -u
+printf '%s' "$UNSET_PROBE" """,
     "function": """f() { local x=inside; printf '%s:%s\\n' "$x" "$1"; }; x=outside; f item; printf '%s\\n' "$x" """,
     "for loop": """for x in a b; do printf '%s\\n' "$x"; done""",
     "conditional": """if false; then printf bad; else printf good; fi""",
