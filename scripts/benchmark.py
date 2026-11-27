@@ -333,6 +333,10 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
         actual = raw["metrics"].get(metric)
         if not finite_number(actual) or not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-6):
             return "P99 disagrees with raw latency samples"
+        if scenario == "contended_spawn":
+            p50 = raw["metrics"].get("contended_spawn_p50_ns")
+            if not finite_number(p50) or not math.isclose(p50, quantile(values, 0.5), rel_tol=1e-9, abs_tol=1e-6):
+                return "P50 disagrees with raw submission latency samples"
     return None
 
 
@@ -433,6 +437,20 @@ def self_test():
                 self.assertIsNone(validate_sample(sample, *args))
                 sample["metrics"][metric] = 10
                 self.assertIsNotNone(validate_sample(sample, *args))
+        def test_contended_producers_and_timing(self):
+            sample = {"schema_version": 1, "engine": "zrun", "scenario": "contended_spawn",
+                      "tasks": 2, "workers": 1, "producers": 4, "completed_tasks": 2,
+                      "active_tasks": 0, "checksum": 1, "correctness": True, "status": "ok",
+                      "build": {}, "config": {"yields": 16, "latency_samples": 2, "hold_ms": 20},
+                      "latency_samples_ns": [20, 80], "metrics": {"elapsed_ns": 1000,
+                      "contended_spawn_ops_per_sec": 2000000, "contended_spawn_p50_ns": 50,
+                      "contended_spawn_p99_ns": 79.4}}
+            args = ("zrun", "contended_spawn", 2, 1, 16, 2, 20)
+            self.assertIsNone(validate_sample(sample, *args))
+            self.assertIsNotNone(validate_sample(dict(sample, producers=1), *args))
+            for field in ("elapsed_ns", "contended_spawn_ops_per_sec", "contended_spawn_p50_ns"):
+                broken = dict(sample, metrics=dict(sample["metrics"], **{field: 0}))
+                self.assertIsNotNone(validate_sample(broken, *args))
         def test_mixed_latency_requires_observed_overlap(self):
             scenario = "batch_external_wake_latency"
             sample = {"schema_version": 1, "engine": "zrun", "scenario": scenario, "tasks": 2,
