@@ -500,3 +500,34 @@ fn one_external_producer_can_reach_a_peer_while_its_first_task_is_blocked() {
     pool.block_on(second).unwrap();
     assert_ne!(first_worker, second_worker.unwrap());
 }
+
+#[test]
+fn a_burst_of_blocking_jobs_reaches_every_compute_worker() {
+    const WORKERS: usize = 4;
+    let mut pool = Pool::new(WORKERS).unwrap();
+    for _ in 0..16 {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, entered) = mpsc::channel();
+        // One batch publishes all four jobs to a single queue. Each worker
+        // must pass remaining work on before it enters the gated user poll.
+        let jobs = pool.spawn_batch((0..WORKERS).map(|_| {
+            let gate = gate.clone();
+            let started = started.clone();
+            async move {
+                started.send(thread::current().id()).unwrap();
+                park_until_done(&gate);
+            }
+        }));
+        let observed = (0..WORKERS)
+            .map(|_| entered.recv_timeout(Duration::from_secs(5)))
+            .collect::<Result<HashSet<_>, _>>();
+        // Always release the workers, including when the timeout fired.
+        let (release, changed) = &*gate;
+        *release.lock().unwrap() = true;
+        changed.notify_all();
+        for job in jobs {
+            pool.block_on(job.unwrap()).unwrap();
+        }
+        assert_eq!(observed.unwrap().len(), WORKERS);
+    }
+}

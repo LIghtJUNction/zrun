@@ -22,6 +22,13 @@ const SUBMISSION_CHUNK: usize = 8;
 const RETAINED_LIMIT: usize = 4;
 const RETAINED_TURNS: usize = 3;
 
+#[derive(Clone, Copy)]
+enum Search {
+    Local,
+    Opportunistic,
+    BeforePark,
+}
+
 enum Arrival {
     Spawn,
     Wake,
@@ -228,7 +235,7 @@ impl SharedPool {
         own: usize,
         retained: &mut VecDeque<TaskRef>,
         retained_turns: &mut usize,
-        allow_steal: bool,
+        search: Search,
     ) -> Option<TaskRef> {
         let worker = &self.workers[own];
         let pop_ready = || {
@@ -236,6 +243,11 @@ impl SharedPool {
             let task = ready.pop_front();
             if self.worker_driven_io && task.is_some() && ready.is_empty() {
                 worker.has_ready.store(false, Ordering::Relaxed);
+            }
+            let handoff = !self.worker_driven_io && !ready.is_empty();
+            drop(ready);
+            if handoff {
+                self.notify_peer(own);
             }
             task
         };
@@ -253,12 +265,13 @@ impl SharedPool {
             return Some(task);
         }
         *retained_turns = RETAINED_TURNS;
-        pop_ready()
-            .or_else(pop_retained)
-            .or_else(|| allow_steal.then(|| self.steal(own)).flatten())
+        pop_ready().or_else(pop_retained).or_else(|| match search {
+            Search::Local => None,
+            Search::Opportunistic | Search::BeforePark => self.steal(own, search),
+        })
     }
 
-    fn steal(&self, own: usize) -> Option<TaskRef> {
+    fn steal(&self, own: usize, search: Search) -> Option<TaskRef> {
         let mut batch = std::array::from_fn::<_, STEAL_LIMIT, _>(|_| None);
         let (before, own_and_after) = self.workers.split_at(own);
         for peer in own_and_after[1..].iter().chain(before) {
@@ -267,9 +280,16 @@ impl SharedPool {
             if self.worker_driven_io && own != 0 && !peer.has_ready.load(Ordering::Relaxed) {
                 continue;
             }
-            let first = {
+            let (first, more) = {
                 let mut victim = match peer.ready.try_lock() {
                     Ok(victim) => victim,
+                    // On the final check, a busy queue can be the only
+                    // source of work left by a worker about to block in poll.
+                    Err(TryLockError::WouldBlock)
+                        if matches!(search, Search::BeforePark) && !self.worker_driven_io =>
+                    {
+                        lock(&peer.ready)
+                    }
                     Err(TryLockError::WouldBlock) => continue,
                     Err(TryLockError::Poisoned(error)) => error.into_inner(),
                 };
@@ -283,8 +303,11 @@ impl SharedPool {
                 if self.worker_driven_io && victim.is_empty() {
                     peer.has_ready.store(false, Ordering::Relaxed);
                 }
-                first
+                (first, !victim.is_empty())
             };
+            if more && !self.worker_driven_io {
+                self.notify_peer(own);
+            }
             // Never hold both worker queue locks. Running the front item
             // before publishing another batch avoids a zero-progress steal.
             if batch[0].is_some() && !self.closed.load(Ordering::Acquire) {
@@ -334,7 +357,7 @@ impl SharedPool {
     fn work(
         self: &Arc<Self>,
         own: usize,
-        speculative_steal: bool,
+        search: Search,
         #[cfg(feature = "io")] mut poller: Option<zrun_io::Poller>,
     ) {
         let identity = Arc::as_ptr(self) as usize;
@@ -370,42 +393,42 @@ impl SharedPool {
                 }
                 io_budget -= 1;
             }
-            let task =
-                match self.next_task(own, &mut retained, &mut retained_turns, speculative_steal) {
-                    Some(task) => task,
-                    None => {
-                        worker.parker.parking.arm();
-                        if self.closed.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let task = self.next_task(own, &mut retained, &mut retained_turns, true);
-                        if task.is_none() {
-                            #[cfg(feature = "io")]
-                            if let Some(poller) = &mut poller {
-                                let result = poller.poll(self.clock.next_timeout());
-                                worker.parker.parking.disarm();
-                                if result.is_err() {
-                                    self.close();
-                                    break;
-                                }
-                                io_budget = 32;
-                                continue;
-                            }
-                            if own == 0 {
-                                match self.clock.next_timeout() {
-                                    Some(timeout) if timeout.is_zero() => {}
-                                    Some(timeout) => thread::park_timeout(timeout),
-                                    None => thread::park(),
-                                }
-                            } else {
-                                thread::park();
-                            }
-                        }
-                        worker.parker.parking.disarm();
-                        let Some(task) = task else { continue };
-                        task
+            let task = match self.next_task(own, &mut retained, &mut retained_turns, search) {
+                Some(task) => task,
+                None => {
+                    worker.parker.parking.arm();
+                    if self.closed.load(Ordering::Acquire) {
+                        break;
                     }
-                };
+                    let task =
+                        self.next_task(own, &mut retained, &mut retained_turns, Search::BeforePark);
+                    if task.is_none() {
+                        #[cfg(feature = "io")]
+                        if let Some(poller) = &mut poller {
+                            let result = poller.poll(self.clock.next_timeout());
+                            worker.parker.parking.disarm();
+                            if result.is_err() {
+                                self.close();
+                                break;
+                            }
+                            io_budget = 32;
+                            continue;
+                        }
+                        if own == 0 {
+                            match self.clock.next_timeout() {
+                                Some(timeout) if timeout.is_zero() => {}
+                                Some(timeout) => thread::park_timeout(timeout),
+                                None => thread::park(),
+                            }
+                        } else {
+                            thread::park();
+                        }
+                    }
+                    worker.parker.parking.disarm();
+                    let Some(task) = task else { continue };
+                    task
+                }
+            };
             task.run_owned(INLINE_REPOLLS, |task| {
                 // Only continuations may be retained. Fresh arrivals keep a
                 // turn after each bounded set of local polls.
@@ -441,7 +464,7 @@ impl SharedPool {
         arrival: Arrival,
     ) -> usize {
         let worker = &self.workers[owner];
-        let backlog = {
+        let (backlog, was_empty) = {
             let mut ready = lock(&worker.ready);
             if self.closed.load(Ordering::Acquire) {
                 return 0;
@@ -451,12 +474,20 @@ impl SharedPool {
             if self.worker_driven_io && was_empty && !ready.is_empty() {
                 worker.has_ready.store(true, Ordering::Relaxed);
             }
-            ready.len()
+            (ready.len(), was_empty)
         };
-        // A worker publishing to its own queue cannot be parked. An external
-        // producer still owes its owner the full arm/notify handshake.
+        // When a compute queue already has runnable work, the previous
+        // publication or a consumer owns its wake. A consumer passes that
+        // notification on before entering a potentially blocking poll.
+        if !local && !self.worker_driven_io && !was_empty && matches!(arrival, Arrival::Spawn) {
+            return backlog;
+        }
         let woke_owner = !local && worker.parker.notify_waiter();
-        if !woke_owner && (backlog > 1 || matches!(arrival, Arrival::Spawn)) {
+        if !woke_owner
+            && (backlog > 1
+                || matches!(arrival, Arrival::Spawn)
+                || (local && !self.worker_driven_io))
+        {
             self.notify_peer(owner);
         }
         backlog
@@ -611,7 +642,11 @@ impl Pool {
                 .spawn(move || {
                     shared.work(
                         index,
-                        !worker_driven_io || index == 0,
+                        if !worker_driven_io || index == 0 {
+                            Search::Opportunistic
+                        } else {
+                            Search::Local
+                        },
                         #[cfg(feature = "io")]
                         worker_poller,
                     );

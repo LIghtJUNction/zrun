@@ -174,7 +174,7 @@ impl Shared {
         // Admission, registration, and initial enqueue are one transaction.
         // On rejection, future remains an argument and drops only after this
         // scoped guard has been released; its Drop may itself call spawn.
-        let accepted = {
+        {
             let mut state = lock(&self.state);
             if state.closed {
                 Err(SpawnError::Shutdown)
@@ -194,11 +194,7 @@ impl Shared {
             } else {
                 Err(SpawnError::IdExhausted)
             }
-        };
-        if accepted.is_ok() {
-            self.parker.notify();
         }
-        accepted
     }
 
     fn refill(&self, batch: &mut Vec<TaskRef>) -> Option<TaskRef> {
@@ -276,7 +272,11 @@ impl Spawner {
         F::Output: Send + 'static,
     {
         match self.shared.upgrade() {
-            Some(shared) => shared.spawn(future),
+            Some(shared) => {
+                let join = shared.spawn(future)?;
+                shared.parker.notify();
+                Ok(join)
+            }
             None => Err(SpawnError::Shutdown),
         }
     }
@@ -333,6 +333,8 @@ impl Runtime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        // A direct borrow excludes the mutable borrow held by either driver.
+        // The queued task is visible on the next drive without a park token.
         self.shared.spawn(future)
     }
 

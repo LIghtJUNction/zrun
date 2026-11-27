@@ -1,6 +1,6 @@
 [package]
 name = "zrun-bench"
-version = "0.1.0-p0.14"
+version = "0.1.0-p0.15"
 edition = "2024"
 rust-version = "1.100"
 publish = false
