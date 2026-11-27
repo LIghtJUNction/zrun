@@ -475,3 +475,28 @@ fn repeated_abort_drains_registered_timers_and_reuses_every_slot() {
         assert_eq!(pool.stats().queued_tasks, 0);
     }
 }
+
+#[test]
+fn one_external_producer_can_reach_a_peer_while_its_first_task_is_blocked() {
+    let mut pool = Pool::new(2).unwrap();
+    let (started, entered) = mpsc::channel();
+    let (release, hold) = mpsc::channel();
+    let first = pool
+        .spawn(async move {
+            started.send(thread::current().id()).unwrap();
+            hold.recv_timeout(Duration::from_secs(10)).unwrap();
+        })
+        .unwrap();
+    let first_worker = entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (started, entered) = mpsc::channel();
+    let second = pool
+        .spawn(async move {
+            started.send(thread::current().id()).unwrap();
+        })
+        .unwrap();
+    let second_worker = entered.recv_timeout(Duration::from_secs(5));
+    release.send(()).unwrap();
+    pool.block_on(first).unwrap();
+    pool.block_on(second).unwrap();
+    assert_ne!(first_worker, second_worker.unwrap());
+}
