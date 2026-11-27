@@ -85,7 +85,7 @@ Table 2. P0 ratio directions and targets inherited from the design.
 | `pending_bytes_per_task`, bytes/task | Lower | ≤ 0.85 | ≤ 0.60 |
 | `idle_rss_delta_bytes`, bytes | Lower | ≤ 0.80 | ≤ 0.50 |
 
-On Linux, `yield_process_cpu_ns` is the difference from `CLOCK_PROCESS_CPUTIME_ID` across the timed yield workload. It counts CPU consumed by the process's threads, including both user and kernel time. Division by the verified wake count gives CPU ns/wake. At one worker, it starts after submission. At multiple workers, it includes submission because workers can already be polling. Runtime creation, the post-run registry drain, and report output are outside the CPU interval. The timed code includes the common futures and join verification. This is a workload CPU cost, distinct from wall time and function-level attribution. Unsupported platforms return null.
+On Linux and macOS, `yield_process_cpu_ns` is the difference from `CLOCK_PROCESS_CPUTIME_ID` across the timed yield workload. Windows uses the sum of kernel and user time from `GetProcessTimes`. This metric counts CPU consumed by the process's threads, including both user and kernel time. Division by the verified wake count gives CPU ns/wake. At one worker, it starts after submission. At multiple workers, it includes submission because workers can already be polling. Runtime creation, the post-run registry drain, and report output are outside the CPU interval. The timed code includes the common futures and join verification. This is a workload CPU cost, distinct from wall time and function-level attribution. If the interval is below the process clock resolution or the platform clock is unavailable, the CPU fields are null.
 
 For each wake-latency scenario, the per-process P99 is computed from the retained raw latencies. The runner verifies that value and summarizes those process P99 values; the summary's P99 is **not** a pooled P99 over all tasks and rounds. Low latency-sample counts and short runs should remain visible in any interpretation.
 
@@ -158,3 +158,6 @@ python3 scripts/benchmark_tcp.py --binary target/release/zrun-tcp-bench \
 ```
 
 同一版本的客户端也可用 `--baseline PATH` 对照较早版本的 zrun 服务端。报告此时按两版相等的阈值评估变化，与 Tokio 的阶段门槛分别解读。
+
+
+The manual **Tokio performance matrix** workflow runs the scheduler and loopback TCP comparisons on Linux, macOS and Windows. Each OS and worker count has a separate runner. Artifacts contain per-process output, compiler and host details, raw samples and confidence intervals. A successful job means the measurements completed and passed the correctness checks. Each metric has its own threshold in the report. CPU allocation and oversubscription depend on the hosted runner.

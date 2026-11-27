@@ -306,9 +306,10 @@ def validate_sample(raw, engine, scenario, tasks, workers, yields, latency_sampl
         metrics = raw["metrics"]
         cpu = metrics.get("yield_process_cpu_ns")
         per_wake = metrics.get("yield_cpu_ns_per_wake")
+        if metrics.get("wake_ops") != tasks * yields:
+            return "invalid wake count"
         if (cpu is not None or per_wake is not None) and (
             not finite_number(cpu) or cpu <= 0 or not finite_number(per_wake)
-            or metrics.get("wake_ops") != tasks * yields
             or not math.isclose(per_wake, cpu / (tasks * yields), rel_tol=1e-12)
         ):
             return "invalid CPU measurement or wake count"

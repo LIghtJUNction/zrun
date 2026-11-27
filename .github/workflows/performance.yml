@@ -1,0 +1,54 @@
+name: Tokio performance matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        workers: [1, 2, 4, 8, 16]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      WORKERS: ${{ matrix.workers }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: cargo build --release --locked -p zrun-bench
+      - name: Collect independent scheduler and TCP processes
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          workers = os.environ['WORKERS']
+          suffix = '.exe' if os.name == 'nt' else ''
+          bin_dir = pathlib.Path('target/release').resolve()
+          for scale in (1000, 10000, 100000, 1000000):
+              subprocess.run([
+                  sys.executable, 'scripts/benchmark.py', '--binary', str(bin_dir / ('zrun-bench' + suffix)),
+                  '--output', f'measurements/scheduler-{scale}', '--tasks', str(scale), '--workers', workers,
+                  '--scenarios', 'spawn_join', 'yield', 'wake_latency', 'external_wake_latency', 'pending_memory',
+                  'idle', 'contended_spawn', '--rounds', '10', '--latency-samples', '2048', '--timeout', '180',
+              ], check=True)
+          subprocess.run([
+              sys.executable, 'scripts/benchmark_tcp.py', '--binary', str(bin_dir / ('zrun-tcp-bench' + suffix)),
+              '--output', 'measurements/tcp', '--workers', workers, '--client-workers', '2',
+              '--case', '16:256:512', '--rounds', '10',
+          ], check=True)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: tokio-${{ matrix.os }}-w${{ matrix.workers }}-${{ github.sha }}
+          path: measurements/
+          if-no-files-found: warn
+          retention-days: 30

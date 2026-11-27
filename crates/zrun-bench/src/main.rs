@@ -521,6 +521,23 @@ impl Future for PendingWork {
     }
 }
 
+#[cfg(windows)]
+fn working_set_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::{
+        ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..Default::default()
+    };
+    // SAFETY: the pseudo-handle refers to the current process. The output
+    // buffer is writable for exactly the size supplied and is not retained.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (ok != 0).then_some(counters.WorkingSetSize as u64)
+}
+
 fn rss() -> Value {
     #[cfg(target_os = "linux")]
     let (source, value) = (
@@ -551,26 +568,8 @@ fn rss() -> Value {
             })
             .and_then(|v| v.checked_mul(1024)),
     );
-    #[cfg(target_os = "windows")]
-    let (source, value) = (
-        "powershell_working_set",
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("(Get-Process -Id {}).WorkingSet64", std::process::id()),
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            }),
-    );
+    #[cfg(windows)]
+    let (source, value) = ("win32_working_set", working_set_bytes());
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     let (source, value): (&str, Option<u64>) = ("unsupported", None);
     json!({"bytes": value, "source": source, "available": value.is_some()})
@@ -683,7 +682,7 @@ fn soak<E: Engine>(c: &Config, mut rt: E) -> Result<Value, String> {
     Ok(result)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_cpu_time() -> Option<Duration> {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -699,7 +698,39 @@ fn process_cpu_time() -> Option<Duration> {
     (nanos < 1_000_000_000).then(|| Duration::new(seconds, nanos))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn process_cpu_time() -> Option<Duration> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: each output points to a distinct live FILETIME. The call reads
+    // the current process and does not retain any of the pointers.
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    ticks(kernel)
+        .checked_add(ticks(user))?
+        .checked_mul(100)
+        .map(Duration::from_nanos)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn process_cpu_time() -> Option<Duration> {
     None
 }
@@ -770,6 +801,7 @@ fn run<E: Engine>(c: &Config) -> Result<Value, String> {
             let ns = started.elapsed().as_nanos().max(1) as u64;
             let cpu_ns = cpu_started
                 .and_then(|start| process_cpu_time()?.checked_sub(start))
+                .filter(|elapsed| !elapsed.is_zero())
                 .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
             let ops = c.tasks as u64 * c.yields as u64;
             metrics = json!({"elapsed_ns": ns, "wake_ops": ops,
