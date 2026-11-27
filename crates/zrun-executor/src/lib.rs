@@ -24,6 +24,7 @@ pub use pool::{Pool, PoolSpawner};
 
 pub const DEFAULT_MAX_TASKS: usize = 65_536;
 const TASK_TURN_BUDGET: usize = 64;
+const READY_BATCH: usize = 16;
 const INLINE_REPOLLS: usize = 2;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -200,8 +201,13 @@ impl Shared {
         accepted
     }
 
-    fn pop(&self) -> Option<TaskRef> {
-        lock(&self.state).ready.pop_front()
+    fn refill(&self, batch: &mut Vec<TaskRef>) -> Option<TaskRef> {
+        let mut state = lock(&self.state);
+        let first = state.ready.pop_front()?;
+        let count = state.ready.len().min(READY_BATCH - 1);
+        // Store the FIFO prefix in reverse so the driver can pop from the end.
+        batch.extend(state.ready.drain(..count).rev());
+        Some(first)
     }
 
     fn has_ready(&self) -> bool {
@@ -282,6 +288,8 @@ impl Spawner {
 /// a poll that never returns. A detached task stays admitted until it finishes,
 /// is explicitly aborted, or the runtime closes.
 pub struct Runtime {
+    // A returning or unwinding root leaves prefetched tasks for the next drive.
+    ready_batch: Vec<TaskRef>,
     shared: Arc<Shared>,
     driver: Driver,
 }
@@ -305,6 +313,7 @@ impl Runtime {
         let parker = Arc::new(Parker::default());
         let timer_parker = parker.clone();
         Ok(Self {
+            ready_batch: Vec::new(),
             shared: Arc::new(Shared {
                 state: Mutex::new(SchedulerState {
                     closed: false,
@@ -344,7 +353,7 @@ impl Runtime {
         };
         RuntimeStats {
             active_tasks,
-            queued_tasks,
+            queued_tasks: queued_tasks + self.ready_batch.len(),
             timer_entries: self.driver.len(),
         }
     }
@@ -407,10 +416,18 @@ impl Runtime {
             }
 
             for _ in 0..TASK_TURN_BUDGET {
-                let Some(task) = self.shared.pop() else {
+                let Some(task) = self
+                    .ready_batch
+                    .pop()
+                    .or_else(|| self.shared.refill(&mut self.ready_batch))
+                else {
                     break;
                 };
-                task.run_owned(INLINE_REPOLLS, |task| self.shared.enqueue(task));
+                task.run_owned(INLINE_REPOLLS, |task| {
+                    // This drive owns the runnable and cannot be asleep or
+                    // shut down while inside its own poll loop.
+                    lock(&self.shared.state).ready.push_back(task);
+                });
                 // Poll at least one available task even if the root wakes
                 // itself on every poll; neither side can starve the other.
                 if signal.notified.load(Ordering::Acquire) {
@@ -423,7 +440,10 @@ impl Runtime {
             // precedes arm is acquired by the flag; one that follows it owes
             // this thread an unpark token, even if park has not started yet.
             self.shared.parker.parking.arm();
-            if signal.notified.load(Ordering::Acquire) || self.shared.has_ready() {
+            if signal.notified.load(Ordering::Acquire)
+                || !self.ready_batch.is_empty()
+                || self.shared.has_ready()
+            {
                 self.shared.parker.parking.disarm();
                 // During sustained runnable work, also collect any I/O that
                 // has become ready, without blocking the next task turn.
@@ -458,6 +478,7 @@ impl Runtime {
             task.shutdown();
         }
         drop(ready);
+        self.ready_batch = Vec::new();
         self.shared.parker.notify();
     }
 }

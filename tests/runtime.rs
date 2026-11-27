@@ -284,3 +284,43 @@ fn one_million_tasks_have_no_loss() {
     assert_eq!(sum, count * (count - 1) / 2);
     assert_eq!(runtime.stats().active_tasks, 0);
 }
+
+#[test]
+fn queued_tasks_survive_early_roots_abort_and_shutdown() {
+    bounded(|| {
+        let mut runtime = Runtime::with_max_tasks(40).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        let first = runtime.spawn(async {}).unwrap();
+        for index in 0..39 {
+            let probe = DropProbe(drops.clone());
+            tasks.push(
+                runtime
+                    .spawn(async move {
+                        drop(probe);
+                        index
+                    })
+                    .unwrap(),
+            );
+        }
+        runtime.block_on(first).unwrap();
+        assert_eq!(runtime.stats().queued_tasks, 39);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let cancelled = tasks.remove(0);
+        cancelled.abort();
+        assert_eq!(runtime.block_on(cancelled), Err(zrun::JoinError::Cancelled));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let next = tasks.remove(0);
+        assert_eq!(runtime.block_on(next), Ok(1));
+        assert_eq!(runtime.stats().queued_tasks, 37);
+
+        runtime.shutdown();
+        assert_eq!(runtime.stats().queued_tasks, 0);
+        assert_eq!(runtime.stats().active_tasks, 0);
+        for task in tasks {
+            assert_eq!(runtime.block_on(task), Err(zrun::JoinError::Shutdown));
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 39);
+    });
+}
