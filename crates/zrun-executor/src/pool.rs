@@ -335,6 +335,7 @@ impl SharedPool {
         let mut io_budget = 32;
         let mut retained = VecDeque::new();
         let mut retained_turns = RETAINED_TURNS;
+        let mut did_work = false;
         while !self.closed.load(Ordering::Acquire) {
             // The first worker owns timer turns. Other workers can register
             // timers concurrently and notify that worker's parker.
@@ -356,6 +357,16 @@ impl SharedPool {
                 match self.next_task(own, &mut retained, &mut retained_turns, speculative_steal) {
                     Some(task) => task,
                     None => {
+                        // After useful work, a short bounded pause gives an arriving
+                        // producer a chance to publish before we enter a kernel wait.
+                        if std::mem::take(&mut did_work)
+                            && !self.worker_driven_io
+                            && self.workers.len() > 1
+                        {
+                            for _ in 0..32 {
+                                std::hint::spin_loop();
+                            }
+                        }
                         worker.parker.parking.arm();
                         if self.closed.load(Ordering::Acquire) {
                             break;
@@ -388,6 +399,7 @@ impl SharedPool {
                         task
                     }
                 };
+            did_work = true;
             task.run_owned(INLINE_REPOLLS, |task| {
                 // Only continuations may be retained. Fresh arrivals keep a
                 // turn after each bounded set of local polls.
