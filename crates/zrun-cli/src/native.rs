@@ -100,8 +100,9 @@ enum Line {
 const BUILTINS: &[&str] = &[
     ".", "eval", "return", "source", ":", "[", "test", "ai", "alias", "async", "await", "builtin",
     "bye", "cd", "chdir", "dirs", "popd", "pushd", "command", "exec", "exit", "export", "false",
-    "declare", "echo", "print", "printf", "pwd", "read", "readonly", "set", "shift", "shell",
-    "typeset", "true", "type", "unalias", "unset", "whence", "where", "which", "zsh-call",
+    "declare", "echo", "print", "printf", "pwd", "read", "readonly", "set", "setopt", "shift",
+    "shell", "typeset", "true", "type", "unalias", "unset", "unsetopt", "whence", "where", "which",
+    "zsh-call",
 ];
 
 struct Session {

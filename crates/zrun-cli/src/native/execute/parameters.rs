@@ -1,4 +1,4 @@
-use super::{State, error, syntax};
+use super::{State, Streams, error, syntax};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
@@ -11,6 +11,55 @@ fn quote(value: &str) -> String {
 }
 
 impl State {
+    pub(super) fn set_named_options(
+        &mut self,
+        command: &str,
+        args: &[String],
+        streams: &mut Streams,
+    ) -> io::Result<u8> {
+        let enable = command == "setopt";
+        let args = if args.first().is_some_and(|arg| arg == "--") {
+            &args[1..]
+        } else {
+            args
+        };
+        if args.is_empty() {
+            for (name, active) in [
+                ("allexport", self.all_export),
+                ("errexit", self.errexit),
+                ("nounset", self.nounset),
+                ("pipefail", self.pipefail),
+            ] {
+                if active == enable {
+                    writeln!(streams.out, "{name}")?;
+                }
+            }
+            return Ok(0);
+        }
+        let mut status = 0;
+        for name in args {
+            let normalized = name.to_ascii_lowercase().replace('_', "");
+            let (name_key, enable_option) = normalized
+                .strip_prefix("no")
+                .map_or((normalized.as_str(), enable), |option| (option, !enable));
+            match name_key {
+                "allexport" => self.all_export = enable_option,
+                "errexit" => self.errexit = enable_option,
+                "pipefail" => self.pipefail = enable_option,
+                "unset" => self.nounset = !enable_option,
+                _ => {
+                    writeln!(
+                        streams.err,
+                        "zrun:{command}:{}: no such option: {name}",
+                        self.line_number
+                    )?;
+                    status = 1;
+                }
+            }
+        }
+        Ok(status)
+    }
+
     pub(super) fn set_parameters(&mut self, args: &[String], out: &mut File) -> io::Result<u8> {
         if args.is_empty() {
             let mut vars: BTreeMap<_, _> = self

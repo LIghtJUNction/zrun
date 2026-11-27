@@ -334,6 +334,7 @@ impl State {
                 result.status
             }
             "set" => self.set_parameters(args, out)?,
+            "setopt" | "unsetopt" => self.set_named_options(name, args, streams)?,
             "shift" => self.shift_parameters(args)?,
             "readonly" | "export" | "typeset" | "declare" => {
                 self.declare_variables(name, args, out)?

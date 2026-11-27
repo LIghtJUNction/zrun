@@ -201,3 +201,13 @@ python3 scripts/check-bash-compat.py ~/.local/bin/zrun --require native
 ```
 
 第二条是原生替换的初步门槛。当前用例覆盖 `set -e`、`pipefail`、`set -u` 及其组合。原生参数展开支持字面默认值和字面后缀移除，仍不支持嵌套展开、通配模式和带引号的操作数。控制流、函数、命令替换、here-doc、数组、trap 等用例仍有已知差异。任何默认替换还需覆盖真实调用方脚本、TTY 与作业控制、信号与中断、重定向与文件描述符、登录启动行为。
+
+### Zsh 兼容验收
+
+Linux 原生 shell 的 `setopt` 和 `unsetopt` 支持 `ALLEXPORT`、`ERR_EXIT`、`PIPE_FAIL` 和 `UNSET`，以及大小写、下划线和 `NO_` 变体。无参数时只列出原生实现中已支持的选项。现有 Zsh 配置和脚本可以用 `zrun --zsh` 交给已安装的 Zsh 执行。
+
+```sh
+python3 scripts/check-zsh-compat.py ~/.local/bin/zrun
+```
+
+对照在独立临时目录中运行 `zsh -f` 和原生 `zrun -c`，比较退出码和两个输出流。需要把它用于强制验收时可加 `--require-native`。原生模式仍有未定义变量诊断、函数、控制流、命令替换、数组、扩展通配和 here-doc 等已知差异。

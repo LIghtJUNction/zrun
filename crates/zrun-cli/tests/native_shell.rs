@@ -468,3 +468,23 @@ printf bad"#,
         b"fixture: line 2: ZRUN_MISSING_FIXTURE: unbound variable\n"
     );
 }
+
+#[test]
+fn zsh_named_options_accept_case_underscores_and_negative_names() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zrun"))
+        .args([
+            "-c",
+            concat!(
+                "setopt ERR_EXIT No_PiPe_FaIl; false | true; ",
+                "unsetopt NO_PIPE_FAIL; false | true || printf recovered; ",
+                "setopt no_unset; printf :%s \"${ZRUN_ZSH_UNSET:-fallback}\"; ",
+                "unsetopt err_exit pipe_fail; setopt"
+            ),
+        ])
+        .env_remove("ZRUN_ZSH_UNSET")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"recovered:fallbacknounset\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
