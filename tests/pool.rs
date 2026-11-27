@@ -413,3 +413,65 @@ fn cancellation_storm_reclaims_armed_timers_and_preserves_live_deadlines() {
         }
     }
 }
+
+#[test]
+fn repeated_abort_drains_registered_timers_and_reuses_every_slot() {
+    use std::future::{Future, poll_fn};
+    use std::pin::pin;
+
+    const CAPACITY: usize = 32;
+    let mut pool = Pool::with_max_tasks(4, CAPACITY).unwrap();
+    let timer = pool.timer();
+    for _ in 0..32 {
+        let (registered, ready) = mpsc::channel();
+        let mut jobs = Vec::with_capacity(CAPACITY);
+        for _ in 0..CAPACITY {
+            let timer = timer.clone();
+            let mut entered = Some(registered.clone());
+            jobs.push(
+                pool.spawn(async move {
+                    let mut sleep = pin!(timer.sleep(Duration::from_secs(600)));
+                    poll_fn(|cx| {
+                        let result = sleep.as_mut().poll(cx);
+                        if result.is_pending()
+                            && let Some(entered) = entered.take()
+                        {
+                            entered.send(()).unwrap();
+                        }
+                        result
+                    })
+                    .await
+                })
+                .unwrap(),
+            );
+        }
+        drop(registered);
+        for _ in 0..CAPACITY {
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert_eq!(pool.stats().timer_entries, CAPACITY);
+        assert!(matches!(
+            pool.spawn(async {}),
+            Err(SpawnError::AtCapacity { .. })
+        ));
+        for job in &jobs {
+            job.abort();
+            job.abort();
+        }
+        pool.block_on(async {
+            for job in jobs {
+                assert_eq!(job.await, Err(JoinError::Cancelled));
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pool.stats().active_tasks != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "cancelled tasks kept admission slots"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(pool.stats().timer_entries, 0);
+        assert_eq!(pool.stats().queued_tasks, 0);
+    }
+}

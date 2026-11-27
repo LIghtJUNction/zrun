@@ -185,8 +185,8 @@ impl Shared {
             } else if let Some(next_id) = state.next_id.checked_add(1) {
                 let id = state.next_id;
                 state.next_id = next_id;
-                let scheduler: Arc<dyn Scheduler> = self.clone();
-                let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
+                let scheduler = Arc::downgrade(self);
+                let (task, join) = Task::allocate(id, future, scheduler);
                 task.set_registry_index(state.tasks.len());
                 state.tasks.push(task.clone());
                 state.ready.push_back(task);

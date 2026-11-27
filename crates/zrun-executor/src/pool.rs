@@ -187,9 +187,9 @@ impl SharedPool {
         active.next_id = id
             .checked_add(MAX_WORKERS as u64)
             .ok_or(SpawnError::IdExhausted)?;
-        let scheduler: Arc<dyn Scheduler> = self.clone();
+        let scheduler = Arc::downgrade(self);
         let future = future.take().expect("admission consumes the future once");
-        let (task, join) = Task::allocate(id, future, Arc::downgrade(&scheduler));
+        let (task, join) = Task::allocate(id, future, scheduler);
         task.set_registry_index(active.tasks.len());
         active.tasks.push(task.clone());
         Ok((task, join))
