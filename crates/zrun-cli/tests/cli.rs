@@ -117,18 +117,26 @@ fn startup(stderr: &mut impl BufRead) -> String {
     line.trim_end().to_owned()
 }
 
-fn post(
-    mut socket: impl Read + Write,
-    host: &str,
-    authorization: &str,
-    request: &Value,
-) -> (u16, Value) {
+fn send_request(socket: &mut impl Write, host: &str, authorization: &str, request: &Value) {
     let body = serde_json::to_string(request).expect("serialize test request");
     write!(
         socket,
         "POST /mcp HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{authorization}\r\n{body}",
         body.len(),
     ).expect("send MCP request");
+}
+
+fn post(
+    mut socket: impl Read + Write,
+    host: &str,
+    authorization: &str,
+    request: &Value,
+) -> (u16, Value) {
+    send_request(&mut socket, host, authorization, request);
+    read_response(socket)
+}
+
+fn read_response(mut socket: impl Read) -> (u16, Value) {
     let mut reply = String::new();
     socket
         .read_to_string(&mut reply)
@@ -302,6 +310,64 @@ fn tcp_unix_stdio_and_cli_share_one_cache_and_keep_tcp_authenticated() {
         &format!("{}\n", reusable()),
     );
     assert_eq!(lines(&output)[0]["disposition"], "cached");
+}
+
+#[test]
+fn disconnecting_the_first_caller_preserves_an_inflight_result() {
+    let directory = Directory::new();
+    let token = "test-coalesced-disconnect-0123456789";
+    let authorization = format!("Authorization: Bearer {token}\r\n");
+    let (_server, mut stderr) = start(
+        zrun()
+            .args(["mcp", "--http", "127.0.0.1:0"])
+            .env("ZRUN_MCP_TOKEN", token)
+            .env("XDG_RUNTIME_DIR", &directory.0)
+            .env_remove("ZRUN_VALKEY_SOCKET"),
+    );
+    let banner = startup(&mut stderr);
+    let addr = banner
+        .strip_prefix("zrun: http://")
+        .and_then(|s| s.strip_suffix("/mcp"))
+        .unwrap_or_else(|| panic!("unexpected startup line: {banner}"));
+    let job = json!({
+        "script": "while [ ! -f release ]; do sleep 0.02; done; printf shared",
+        "cwd": directory.0, "timeout_ms": 15000,
+        "reuse": {"scope":"fixture", "input_revision":"one", "ttl_ms":0}
+    });
+    let wait_for = |field: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = zrun()
+                .arg("--stats")
+                .env("XDG_RUNTIME_DIR", &directory.0)
+                .output()
+                .unwrap();
+            let stats = lines(&output).pop().unwrap();
+            if stats["counters"][field] == 1 {
+                assert_eq!(stats["counters"]["started"], 1);
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{stats}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let mut first = TcpStream::connect(addr).unwrap();
+    send_request(&mut first, addr, &authorization, &call(1, job.clone()));
+    wait_for("started");
+    let mut second = TcpStream::connect(addr).unwrap();
+    second
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    send_request(&mut second, addr, &authorization, &call(2, job));
+    wait_for("coalesced");
+    drop(first);
+    fs::write(directory.0.join("release"), []).unwrap();
+    let (status, reply) = read_response(second);
+    assert_eq!(status, 200);
+    let delivery = &reply["result"]["structuredContent"];
+    assert_eq!(delivery["disposition"], "coalesced");
+    assert_eq!(delivery["result"]["exit_code"], 0);
+    assert_eq!(delivery["result"]["stdout"]["data"], "shared");
 }
 
 #[test]
