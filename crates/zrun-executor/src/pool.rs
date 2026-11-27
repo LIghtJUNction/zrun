@@ -30,7 +30,7 @@ enum Arrival {
 static NEXT_PRODUCER: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    static PRODUCER_ID: usize = NEXT_PRODUCER.fetch_add(1, Ordering::Relaxed);
+    static PRODUCER_LANE: Cell<usize> = Cell::new(NEXT_PRODUCER.fetch_add(1, Ordering::Relaxed));
     static CURRENT_WORKER: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
@@ -97,12 +97,20 @@ impl SharedPool {
             if self.worker_driven_io {
                 self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len()
             } else {
-                PRODUCER_ID.with(|id| id % self.workers.len())
+                PRODUCER_LANE
+                    .try_with(Cell::get)
+                    .unwrap_or_else(|_| self.route.fetch_add(1, Ordering::Relaxed))
+                    % self.workers.len()
             }
         });
         let preferred = owner % self.active.len();
         let (task, join) = self.admit(preferred, future)?;
-        self.publish(task, owner, caller.is_some(), Arrival::Spawn);
+        let backlog = self.publish(task, owner, caller.is_some(), Arrival::Spawn);
+        // Once the owner has a full steal batch waiting, let this producer
+        // try another queue. No extra queue lock or depth counter is needed.
+        if backlog > STEAL_LIMIT && caller.is_none() && !self.worker_driven_io {
+            let _ = PRODUCER_LANE.try_with(|lane| lane.set(owner + 1));
+        }
         Ok(join)
     }
 
@@ -421,8 +429,8 @@ impl SharedPool {
         self.publish(task, owner, caller.is_some(), arrival);
     }
 
-    fn publish(&self, task: TaskRef, owner: usize, local: bool, arrival: Arrival) {
-        self.publish_tasks(std::iter::once(task), owner, local, arrival);
+    fn publish(&self, task: TaskRef, owner: usize, local: bool, arrival: Arrival) -> usize {
+        self.publish_tasks(std::iter::once(task), owner, local, arrival)
     }
 
     fn publish_tasks(
@@ -431,12 +439,12 @@ impl SharedPool {
         owner: usize,
         local: bool,
         arrival: Arrival,
-    ) {
+    ) -> usize {
         let worker = &self.workers[owner];
         let backlog = {
             let mut ready = lock(&worker.ready);
             if self.closed.load(Ordering::Acquire) {
-                return;
+                return 0;
             }
             let was_empty = ready.is_empty();
             ready.extend(tasks);
@@ -451,6 +459,7 @@ impl SharedPool {
         if !woke_owner && (backlog > 1 || matches!(arrival, Arrival::Spawn)) {
             self.notify_peer(owner);
         }
+        backlog
     }
 
     fn notify_peer(&self, owner: usize) {
