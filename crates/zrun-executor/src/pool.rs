@@ -27,7 +27,10 @@ enum Arrival {
     Wake,
 }
 
+static NEXT_PRODUCER: AtomicUsize = AtomicUsize::new(0);
+
 thread_local! {
+    static PRODUCER_ID: usize = NEXT_PRODUCER.fetch_add(1, Ordering::Relaxed);
     static CURRENT_WORKER: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
@@ -88,8 +91,15 @@ impl SharedPool {
         F::Output: Send + 'static,
     {
         let caller = self.local_worker();
-        let owner = caller
-            .unwrap_or_else(|| self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len());
+        // Keep independent external producers on separate injection queues.
+        // Peers retain the ordinary wake and bounded steal paths.
+        let owner = caller.unwrap_or_else(|| {
+            if self.worker_driven_io {
+                self.route.fetch_add(1, Ordering::Relaxed) % self.workers.len()
+            } else {
+                PRODUCER_ID.with(|id| id % self.workers.len())
+            }
+        });
         let preferred = owner % self.active.len();
         let (task, join) = self.admit(preferred, future)?;
         self.publish(task, owner, caller.is_some(), Arrival::Spawn);
