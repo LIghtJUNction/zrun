@@ -119,6 +119,9 @@ export ZRUN_VALKEY_TOOL_REVISION=toolchain-2026-11
 
 ## Project Z 集成
 
+Linux 任务树内存上限、现有 zmem/SSMCP 能力与尚未完成的隔离验收，见
+[任务内存边界](task-memory-boundaries.md)。输出预算不等于任务树内存硬限额。
+
 - `zrun --zmem interactive run 'cat /proc/self/cgroup'` 用 zmem 启动整个 zrun 实例。常驻服务也可用 `zrun --zmem background mcp --unix PATH`。子命令继承服务的 cgroup，避免每条工作重复创建 zmem scope。
 - `ZRUN_POLICY=/path/to/policy.json` 配置 zguard。可用字段为 `shell`（`allow`、`deny` 或 `require_approval`）、`max_calls` 和 `max_payload_bytes`。每次提交都检查，包括读缓存。`require_approval` 当前返回拒绝。
 - `ZRUN_PLUGIN=/path/to/plugin.so` 加载可信的 zplugin 原生准入插件。接口 ID 为 `dev.project-z.zrun.admission`，由 `zrun-plugin-api` 提供。版本 2 接收完整的位置参数，每个 UTF-8 参数以 NUL 结尾。版本 1 仍受支持，只接受无位置参数的任务。插件在独立线程用有界队列检查规范化后的调用。插件返回拒绝或错误时，服务不会执行命令或读取缓存。
